@@ -6,6 +6,27 @@ __pycache__/
 # C extensions
 *.so
 
+# Python bytecode
+__pycache__/
+*.py[cod]
+
+# Virtual environments
+.venv/
+venv/
+
+# Logs
+*.log
+
+# Editor/OS files
+.DS_Store
+*.swp
+*~
+
+# Test/type/lint caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
 # Distribution / packaging
 .Python
 build/
