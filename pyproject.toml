@@ -1,0 +1,14 @@
+[project]
+name = "spread-gui"
+version = "0.1.0"
+requires-python = ">=3.9"
+dependencies = [
+  "PyQt6<6.10",
+  "PyQt6-Qt6<6.10",
+  "PyQt6-sip<14",
+  "requests",
+  "gemmi",
+]
+
+[tool.uv]
+package = true
