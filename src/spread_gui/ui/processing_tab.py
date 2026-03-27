@@ -37,7 +37,12 @@ from spread_gui.core.wedges import compute_wedges
 from spread_gui.core.spacegroups import all_spacegroups_230, cell_is_compatible_with_sg
 
 from spread_gui.services.rcsb import fetch_pdb_text
-from spread_gui.services.slurm import chmod_x, run_sbatch
+from spread_gui.services.slurm import (
+    chmod_x,
+    run_sbatch,
+    get_slurm_jwt,
+    submit_job_via_rest_api,
+)
 
 _CONFIG_PATH = Path.home() / ".config" / "spread_gui" / "settings.ini"
 
@@ -256,11 +261,22 @@ class ProcessingTab(QWidget):
         pr.addStretch(1)
         root.addWidget(p_box)
 
+        # Submission method
+        sub_box = QGroupBox("Submission method")
+        sub_row = QHBoxLayout(sub_box)
+        self.rb_submit_rest = QRadioButton("REST API (recommended)")
+        self.rb_submit_sbatch = QRadioButton("sbatch (run on Wilson as fallback)")
+        self.rb_submit_rest.setChecked(True)
+        sub_row.addWidget(self.rb_submit_rest)
+        sub_row.addWidget(self.rb_submit_sbatch)
+        sub_row.addStretch(1)
+        root.addWidget(sub_box)
+
         # Actions
         a_row = QHBoxLayout()
         self.btn_generate = QPushButton("Generate scripts")
-        self.btn_submit = QPushButton("Submit jobs (sbatch)")
-        self.chk_dry_run = QCheckBox("Dry run (don't call sbatch)")
+        self.btn_submit = QPushButton("Submit jobs")
+        self.chk_dry_run = QCheckBox("Dry run (don't submit)")
         self.chk_dry_run.setChecked(True)
         a_row.addWidget(self.btn_generate)
         a_row.addWidget(self.btn_submit)
@@ -362,6 +378,12 @@ class ProcessingTab(QWidget):
         elif pipeline == "autoproc":
             self.rb_autoproc.setChecked(True)
 
+        submit_method = s.get("submit_method", "")
+        if submit_method == "sbatch":
+            self.rb_submit_sbatch.setChecked(True)
+        elif submit_method == "rest":
+            self.rb_submit_rest.setChecked(True)
+
         if "dry_run" in s:
             self.chk_dry_run.setChecked(s["dry_run"].lower() == "true")
 
@@ -404,6 +426,7 @@ class ProcessingTab(QWidget):
             "data_path": self.data_path_edit.text(),
             "proc_path": self.proc_path_edit.text(),
             "pipeline": self._pipeline_key(),
+            "submit_method": "rest" if self.rb_submit_rest.isChecked() else "sbatch",
             "dry_run": str(self.chk_dry_run.isChecked()),
             "energy_mode": "range" if self.rb_energy_range.isChecked() else "list",
             "energy_start": str(self.energy_start.value()),
@@ -748,6 +771,7 @@ done
 
     def _make_autoproc_job(self, data_dir: str, cell: Cell, sg: str) -> str:
         return f"""#!/bin/bash
+. /etc/profile.d/modules.sh
 #SBATCH --job-name=autoPROC_job
 #SBATCH --output=slurm-%j.out
 #SBATCH --error=slurm-%j.err
@@ -776,6 +800,7 @@ process -M DiamondI23 \\
 
     def _make_xia2_dials_job(self, data_dir: str, cell: Cell, sg: str) -> str:
         return f"""#!/bin/bash
+. /etc/profile.d/modules.sh
 #SBATCH --job-name=xia2_dials_job
 #SBATCH --output=slurm-%j.out
 #SBATCH --error=slurm-%j.err
@@ -801,6 +826,7 @@ xia2 pipeline=dials \\
 
     def _make_xia2_3dii_job(self, data_dir: str, cell: Cell, sg: str) -> str:
         return f"""#!/bin/bash
+. /etc/profile.d/modules.sh
 #SBATCH --job-name=xia2_3dii_job
 #SBATCH --output=slurm-%j.out
 #SBATCH --error=slurm-%j.err
@@ -903,9 +929,25 @@ xia2 pipeline=3dii \\
             return
 
         dry = self.chk_dry_run.isChecked()
-
-        # MainWindow is parent of the scroll area; handle both cases robustly.
+        use_rest = self.rb_submit_rest.isChecked()
         mw = self.window()
+
+        # Fetch JWT token once before the loop (REST API path only).
+        token = ""
+        if use_rest and not dry:
+            if hasattr(mw, "set_status"):
+                mw.set_status("Fetching SLURM token…", 0, total)
+            try:
+                token = get_slurm_jwt()
+                self._log("SLURM JWT token acquired.")
+            except Exception as e:
+                self._warn(
+                    "Token error",
+                    f"Could not obtain SLURM JWT via SSH to wilson:\n\n{e}\n\n"
+                    "Switch to 'sbatch' mode and run the driver script on Wilson as a fallback.",
+                )
+                return
+
         if hasattr(mw, "set_status"):
             mw.set_status(f"{'Dry-run' if dry else 'Submitting'} {total} jobs…", 0, total)
 
@@ -918,17 +960,30 @@ xia2 pipeline=3dii \\
                 if hasattr(mw, "set_status"):
                     mw.set_status("Submitting jobs…", submitted, total)
 
-                cmd = ["sbatch", pipeline_script, str(e), str(a), str(counter)]
-                rc, out, err = run_sbatch(cmd, cwd=proc_dir, dry_run=dry)
+                if use_rest:
+                    # Minimal wrapper: the pipeline script already lives on the
+                    # shared filesystem and is accessible from the cluster nodes.
+                    wrapper = (
+                        f"#!/bin/bash\n"
+                        f"bash {shlex.quote(script_path)} {e} {a} {counter}\n"
+                    )
+                    rc, out, err = submit_job_via_rest_api(
+                        wrapper, proc_dir, token, dry_run=dry
+                    )
+                else:
+                    cmd = ["sbatch", pipeline_script, str(e), str(a), str(counter)]
+                    rc, out, err = run_sbatch(cmd, cwd=proc_dir, dry_run=dry)
 
                 if dry:
                     self._log(out)
+                elif rc in (0, 200):
+                    self._log(f"Submitted job {submitted}/{total}: {out.strip()}")
                 else:
-                    if rc == 0:
-                        self._log(f"Submitted: {out}")
-                    else:
-                        self._log(f"sbatch failed rc={rc}: {err or out}")
+                    self._log(f"Submission failed (rc={rc}): {err or out}")
 
         if hasattr(mw, "set_status"):
             mw.set_status("Done.", total, total)
-            self._info("Submission complete", f"{'Dry run complete' if dry else 'Submission complete'}.\nJobs: {total}")
+        self._info(
+            "Submission complete",
+            f"{'Dry run complete' if dry else 'Submission complete'}.\nJobs: {total}",
+        )
