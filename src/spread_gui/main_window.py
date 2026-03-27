@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from PyQt6.QtGui import QCloseEvent
 from PyQt6.QtWidgets import (
     QMainWindow,
     QTabWidget,
@@ -14,7 +15,7 @@ from spread_gui.ui.analysis_tab import AnalysisTab
 
 
 class MainWindow(QMainWindow):
-    def __init__(self):
+    def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("SPREAD Processing Pipeline")
         self.resize(1200, 850)
@@ -44,10 +45,14 @@ class MainWindow(QMainWindow):
         sb.addWidget(self.status_label, 3)
         self.setStatusBar(sb)
 
-    def set_status(self, text: str, done: int, total: int):
+    def set_status(self, text: str, done: int, total: int) -> None:
         self.status_label.setText(text)
         if total > 0:
             pct = int(100.0 * done / total)
             self.progress.setValue(max(0, min(100, pct)))
         else:
             self.progress.setValue(0)
+
+    def closeEvent(self, event: QCloseEvent) -> None:
+        self.proc_tab.save_settings()
+        super().closeEvent(event)

@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import configparser
+import datetime
 import os
 import re
 import shlex
+from pathlib import Path
 from typing import List, Optional, Tuple
 
 from PyQt6.QtCore import QTimer, QFileSystemWatcher
@@ -36,9 +39,11 @@ from spread_gui.core.spacegroups import all_spacegroups_230, cell_is_compatible_
 from spread_gui.services.rcsb import fetch_pdb_text
 from spread_gui.services.slurm import chmod_x, run_sbatch
 
+_CONFIG_PATH = Path.home() / ".config" / "spread_gui" / "settings.ini"
+
 
 class ProcessingTab(QWidget):
-    def __init__(self, parent: QWidget | None = None):
+    def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
 
         # Auto-energy mechanisms
@@ -55,11 +60,12 @@ class ProcessingTab(QWidget):
         self._build_ui()
         self._wire_signals()
         self._apply_defaults_from_cwd()
+        self._load_settings()
         self._refresh_previews_and_validation()
         self._schedule_energy_scan()
 
     # ---------------- UI ----------------
-    def _build_ui(self):
+    def _build_ui(self) -> None:
         root = QVBoxLayout(self)
 
         title = QLabel("SPREAD – Processing")
@@ -254,7 +260,7 @@ class ProcessingTab(QWidget):
         a_row = QHBoxLayout()
         self.btn_generate = QPushButton("Generate scripts")
         self.btn_submit = QPushButton("Submit jobs (sbatch)")
-        self.chk_dry_run = QCheckBox("Dry run (don’t call sbatch)")
+        self.chk_dry_run = QCheckBox("Dry run (don't call sbatch)")
         self.chk_dry_run.setChecked(True)
         a_row.addWidget(self.btn_generate)
         a_row.addWidget(self.btn_submit)
@@ -263,6 +269,13 @@ class ProcessingTab(QWidget):
         root.addLayout(a_row)
 
         # Log
+        log_header = QHBoxLayout()
+        log_header.addWidget(QLabel("Log"))
+        log_header.addStretch(1)
+        self.btn_save_log = QPushButton("Save log…")
+        log_header.addWidget(self.btn_save_log)
+        root.addLayout(log_header)
+
         self.log = QTextEdit()
         self.log.setReadOnly(True)
         self.log.setPlaceholderText("Log…")
@@ -271,7 +284,7 @@ class ProcessingTab(QWidget):
         self._update_pdb_mode()
         self._update_energy_mode()
 
-    def _wire_signals(self):
+    def _wire_signals(self) -> None:
         self.visit_edit.textChanged.connect(self._validate_visit)
 
         self.rb_pdb_file.toggled.connect(self._update_pdb_mode)
@@ -304,9 +317,10 @@ class ProcessingTab(QWidget):
 
         self.btn_generate.clicked.connect(self.generate_scripts)
         self.btn_submit.clicked.connect(self.submit_jobs)
+        self.btn_save_log.clicked.connect(self._save_log)
 
     # ---------------- Defaults ----------------
-    def _apply_defaults_from_cwd(self):
+    def _apply_defaults_from_cwd(self) -> None:
         cwd = os.getcwd()
         visit = detect_visit_from_path(cwd)
         if visit:
@@ -319,25 +333,113 @@ class ProcessingTab(QWidget):
         else:
             self.visit_hint.setText("No visit detected in current path (you can enter manually).")
 
+    # ---------------- Persistent settings ----------------
+    def _load_settings(self) -> None:
+        cfg = configparser.ConfigParser()
+        if not _CONFIG_PATH.exists():
+            return
+        cfg.read(_CONFIG_PATH)
+        if "spread_gui" not in cfg:
+            return
+        s = cfg["spread_gui"]
+
+        for key, widget in (
+            ("visit", self.visit_edit),
+            ("project", self.project_edit),
+            ("crystal", self.crystal_edit),
+            ("data_path", self.data_path_edit),
+            ("proc_path", self.proc_path_edit),
+            ("energy_list", self.energy_list_edit),
+        ):
+            if key in s:
+                widget.setText(s[key])
+
+        pipeline = s.get("pipeline", "")
+        if pipeline == "xia2_dials":
+            self.rb_xia2_dials.setChecked(True)
+        elif pipeline == "xia2_3dii":
+            self.rb_xia2_3dii.setChecked(True)
+        elif pipeline == "autoproc":
+            self.rb_autoproc.setChecked(True)
+
+        if "dry_run" in s:
+            self.chk_dry_run.setChecked(s["dry_run"].lower() == "true")
+
+        energy_mode = s.get("energy_mode", "")
+        if energy_mode == "list":
+            self.rb_energy_list.setChecked(True)
+        elif energy_mode == "range":
+            self.rb_energy_range.setChecked(True)
+
+        for key, spin in (
+            ("energy_start", self.energy_start),
+            ("energy_end", self.energy_end),
+            ("energy_inc", self.energy_inc),
+        ):
+            if key in s:
+                try:
+                    spin.setValue(float(s[key]))
+                except ValueError:
+                    pass
+
+        for key, spin in (
+            ("wedge_size", self.wedge_size),
+            ("total_images", self.total_images),
+        ):
+            if key in s:
+                try:
+                    spin.setValue(int(s[key]))
+                except ValueError:
+                    pass
+
+        if "auto_energies" in s:
+            self.chk_auto_energies.setChecked(s["auto_energies"].lower() == "true")
+
+    def save_settings(self) -> None:
+        cfg = configparser.ConfigParser()
+        cfg["spread_gui"] = {
+            "visit": self.visit_edit.text(),
+            "project": self.project_edit.text(),
+            "crystal": self.crystal_edit.text(),
+            "data_path": self.data_path_edit.text(),
+            "proc_path": self.proc_path_edit.text(),
+            "pipeline": self._pipeline_key(),
+            "dry_run": str(self.chk_dry_run.isChecked()),
+            "energy_mode": "range" if self.rb_energy_range.isChecked() else "list",
+            "energy_start": str(self.energy_start.value()),
+            "energy_end": str(self.energy_end.value()),
+            "energy_inc": str(self.energy_inc.value()),
+            "energy_list": self.energy_list_edit.text(),
+            "wedge_size": str(self.wedge_size.value()),
+            "total_images": str(self.total_images.value()),
+            "auto_energies": str(self.chk_auto_energies.isChecked()),
+        }
+        _CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            with open(_CONFIG_PATH, "wt") as fh:
+                cfg.write(fh)
+        except Exception as e:
+            self._log(f"Warning: could not save settings to {_CONFIG_PATH}: {e}")
+
     # ---------------- UI helpers ----------------
-    def _log(self, msg: str):
+    def _log(self, msg: str) -> None:
         self.log.append(msg)
         self.log.ensureCursorVisible()
 
-    def _warn(self, title: str, msg: str):
+    def _warn(self, title: str, msg: str) -> None:
         QMessageBox.warning(self, title, msg)
 
-    def _info(self, title: str, msg: str):
+    def _info(self, title: str, msg: str) -> None:
         QMessageBox.information(self, title, msg)
 
-    def _update_pdb_mode(self):
+    def _update_pdb_mode(self) -> None:
         file_mode = self.rb_pdb_file.isChecked()
         self.pdb_path_edit.setEnabled(file_mode)
         self.btn_browse_pdb.setEnabled(file_mode)
         self.pdb_code_edit.setEnabled(not file_mode)
         self.btn_fetch_pdb.setEnabled(not file_mode)
 
-    def _update_energy_mode(self):
+    def _update_energy_mode(self) -> None:
         range_mode = self.rb_energy_range.isChecked()
         auto = self.chk_auto_energies.isChecked()
         self.energy_start.setEnabled(range_mode and not auto)
@@ -346,13 +448,29 @@ class ProcessingTab(QWidget):
         self.energy_list_edit.setEnabled((not range_mode) and (not auto))
         self._refresh_previews_and_validation()
 
-    def _browse_dir(self, target: QLineEdit):
+    def _browse_dir(self, target: QLineEdit) -> None:
         d = QFileDialog.getExistingDirectory(self, "Select directory", target.text().strip() or os.getcwd())
         if d:
             target.setText(d)
 
+    def _save_log(self) -> None:
+        proc_dir = self.proc_path_edit.text().strip() or os.getcwd()
+        ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        default_name = os.path.join(proc_dir, f"spread_gui_{ts}.log")
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Save log", default_name, "Log files (*.log);;All files (*)"
+        )
+        if not path:
+            return
+        try:
+            with open(path, "wt") as fh:
+                fh.write(self.log.toPlainText())
+            self._log(f"Log saved to {path}")
+        except Exception as e:
+            self._warn("Save log failed", str(e))
+
     # ---------------- Auto-energy detection ----------------
-    def _auto_energies_toggled(self, enabled: bool):
+    def _auto_energies_toggled(self, enabled: bool) -> None:
         if enabled:
             self.rb_energy_list.setChecked(True)
             self._update_energy_mode()
@@ -361,12 +479,12 @@ class ProcessingTab(QWidget):
             self._update_energy_mode()
             self._refresh_previews_and_validation()
 
-    def _schedule_energy_scan(self):
+    def _schedule_energy_scan(self) -> None:
         if not self.chk_auto_energies.isChecked():
             return
         self._energy_scan_timer.start(300)
 
-    def _set_watched_directory(self, path: str):
+    def _set_watched_directory(self, path: str) -> None:
         path = path.strip()
         if not path or not os.path.isdir(path):
             if self._watched_data_dir:
@@ -392,7 +510,7 @@ class ProcessingTab(QWidget):
         except Exception:
             self._watched_data_dir = None
 
-    def _auto_update_energies_from_data_dir(self):
+    def _auto_update_energies_from_data_dir(self) -> None:
         data_dir = self.data_path_edit.text().strip()
         self._set_watched_directory(data_dir)
 
@@ -421,7 +539,7 @@ class ProcessingTab(QWidget):
         self._refresh_previews_and_validation()
 
     # ---------------- Validation & previews ----------------
-    def _validate_visit(self):
+    def _validate_visit(self) -> None:
         txt = self.visit_edit.text().strip()
         if txt == "":
             self.visit_edit.setStyleSheet("")
@@ -438,7 +556,7 @@ class ProcessingTab(QWidget):
             gamma=float(self.cell_spins[5].value()),
         )
 
-    def _validate_cell_sg(self):
+    def _validate_cell_sg(self) -> None:
         cell = self._current_cell()
         sg_name = normalize_sg_name(self.sg_combo.currentText())
         ok, msg = cell_is_compatible_with_sg(cell, sg_name)
@@ -456,7 +574,7 @@ class ProcessingTab(QWidget):
 
         self.compat_label.setText(msg)
 
-    def _refresh_previews_and_validation(self):
+    def _refresh_previews_and_validation(self) -> None:
         self._validate_visit()
         self._validate_cell_sg()
 
@@ -488,7 +606,7 @@ class ProcessingTab(QWidget):
             self.wedge_preview.setText("list_of_wedges: (none / invalid)")
 
     # ---------------- PDB load / fetch ----------------
-    def _browse_pdb(self):
+    def _browse_pdb(self) -> None:
         fn, _ = QFileDialog.getOpenFileName(
             self,
             "Select PDB file",
@@ -499,7 +617,7 @@ class ProcessingTab(QWidget):
             self.pdb_path_edit.setText(fn)
             self._load_pdb_if_possible()
 
-    def _load_pdb_if_possible(self):
+    def _load_pdb_if_possible(self) -> None:
         path = self.pdb_path_edit.text().strip()
         if not path:
             return
@@ -508,7 +626,7 @@ class ProcessingTab(QWidget):
             return
         self._apply_pdb_header(path)
 
-    def _fetch_pdb(self):
+    def _fetch_pdb(self) -> None:
         code = self.pdb_code_edit.text().strip().upper()
         if not re.match(r"^[0-9][A-Z0-9]{3}$", code):
             self._warn("PDB code", "Please enter a valid 4-character PDB code (e.g. 1ABC).")
@@ -543,7 +661,7 @@ class ProcessingTab(QWidget):
         self.pdb_path_edit.setText(out_path)
         self._apply_pdb_header(out_path)
 
-    def _apply_pdb_header(self, pdb_path: str):
+    def _apply_pdb_header(self, pdb_path: str) -> None:
         cell, sg = parse_pdb_cryst1(pdb_path)
         if cell:
             self.cell_spins[0].setValue(cell.a)
@@ -706,7 +824,7 @@ xia2 pipeline=3dii \\
   unit_cell="{cell.as_autoproc_string()}"
 """
 
-    def generate_scripts(self):
+    def generate_scripts(self) -> None:
         try:
             energies, wedges = self._validate_before_generate()
         except Exception as e:
@@ -757,7 +875,7 @@ xia2 pipeline=3dii \\
         self._log(f" - {d3}")
         self._info("Scripts generated", f"Generated scripts in:\n{proc_dir}")
 
-    def submit_jobs(self):
+    def submit_jobs(self) -> None:
         self.generate_scripts()
 
         try:
