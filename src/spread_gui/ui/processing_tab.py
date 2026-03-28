@@ -250,7 +250,9 @@ class ProcessingTab(QWidget):
 
         # Pipeline selection
         p_box = QGroupBox("Processing pipeline")
-        pr = QHBoxLayout(p_box)
+        p_vbox = QVBoxLayout(p_box)
+
+        pr = QHBoxLayout()
         self.rb_autoproc = QRadioButton("AutoProc")
         self.rb_xia2_dials = QRadioButton("Xia2 DIALS")
         self.rb_xia2_3dii = QRadioButton("Xia2 3dii")
@@ -259,6 +261,17 @@ class ProcessingTab(QWidget):
         pr.addWidget(self.rb_xia2_3dii)
         pr.addWidget(self.rb_autoproc)
         pr.addStretch(1)
+        p_vbox.addLayout(pr)
+
+        atom_row = QHBoxLayout()
+        atom_row.addWidget(QLabel("Atom (xia2 only):"))
+        self.atom_edit = QLineEdit()
+        self.atom_edit.setPlaceholderText("e.g. se, fe  (leave blank to omit)")
+        self.atom_edit.setMaximumWidth(220)
+        atom_row.addWidget(self.atom_edit)
+        atom_row.addStretch(1)
+        p_vbox.addLayout(atom_row)
+
         root.addWidget(p_box)
 
         # Submission method
@@ -366,6 +379,7 @@ class ProcessingTab(QWidget):
             ("data_path", self.data_path_edit),
             ("proc_path", self.proc_path_edit),
             ("energy_list", self.energy_list_edit),
+            ("atom", self.atom_edit),
         ):
             if key in s:
                 widget.setText(s[key])
@@ -425,6 +439,7 @@ class ProcessingTab(QWidget):
             "crystal": self.crystal_edit.text(),
             "data_path": self.data_path_edit.text(),
             "proc_path": self.proc_path_edit.text(),
+            "atom": self.atom_edit.text(),
             "pipeline": self._pipeline_key(),
             "submit_method": "rest" if self.rb_submit_rest.isChecked() else "sbatch",
             "dry_run": str(self.chk_dry_run.isChecked()),
@@ -798,7 +813,8 @@ process -M DiamondI23 \\
   symm="{sg}" > aP.log
 """
 
-    def _make_xia2_dials_job(self, data_dir: str, cell: Cell, sg: str) -> str:
+    def _make_xia2_dials_job(self, data_dir: str, cell: Cell, sg: str, atom: str) -> str:
+        atom_line = f"  atom={atom.strip()} \\\n" if atom.strip() else ""
         return f"""#!/bin/bash
 . /etc/profile.d/modules.sh
 #SBATCH --job-name=xia2_dials_job
@@ -818,13 +834,16 @@ energy_dir="${{BASE_DIR}}/${{energy}}eV"
 angle_dir="${{energy_dir}}/${{angle}}deg"
 mkdir -p "$angle_dir"
 cd "$angle_dir" || exit 1
+mkdir -p dials
+cd dials
 xia2 pipeline=dials \\
-  image="${{DATA_DIR}}/${{energy}}_E${{counter}}_1_#####.cbf" \\
-  space_group="{sg}" \\
+  image=${{DATA_DIR}}/${{energy}}_E${{counter}}_1_00001.cbf:1:${{angle}}0 \\
+{atom_line}  space_group="{sg}" \\
   unit_cell="{cell.as_autoproc_string()}"
 """
 
-    def _make_xia2_3dii_job(self, data_dir: str, cell: Cell, sg: str) -> str:
+    def _make_xia2_3dii_job(self, data_dir: str, cell: Cell, sg: str, atom: str) -> str:
+        atom_line = f"  atom={atom.strip()} \\\n" if atom.strip() else ""
         return f"""#!/bin/bash
 . /etc/profile.d/modules.sh
 #SBATCH --job-name=xia2_3dii_job
@@ -844,9 +863,11 @@ energy_dir="${{BASE_DIR}}/${{energy}}eV"
 angle_dir="${{energy_dir}}/${{angle}}deg"
 mkdir -p "$angle_dir"
 cd "$angle_dir" || exit 1
+mkdir -p xia2-3dii
+cd xia2-3dii
 xia2 pipeline=3dii \\
-  image="${{DATA_DIR}}/${{energy}}_E${{counter}}_1_#####.cbf" \\
-  space_group="{sg}" \\
+  image=${{DATA_DIR}}/${{energy}}_E${{counter}}_1_00001.cbf:1:${{angle}}0 \\
+{atom_line}  space_group="{sg}" \\
   unit_cell="{cell.as_autoproc_string()}"
 """
 
@@ -861,6 +882,7 @@ xia2 pipeline=3dii \\
         proc_dir = self.proc_path_edit.text().strip()
         cell = self._current_cell()
         sg = normalize_sg_name(self.sg_combo.currentText())
+        atom = self.atom_edit.text().strip()
 
         submit_script, ap, dials, d3 = self._script_paths()
 
@@ -873,8 +895,8 @@ xia2 pipeline=3dii \\
 
         driver = self._make_driver_script(energies, wedges, pipeline_script)
         ap_txt = self._make_autoproc_job(data_dir, cell, sg)
-        dials_txt = self._make_xia2_dials_job(data_dir, cell, sg)
-        d3_txt = self._make_xia2_3dii_job(data_dir, cell, sg)
+        dials_txt = self._make_xia2_dials_job(data_dir, cell, sg, atom)
+        d3_txt = self._make_xia2_3dii_job(data_dir, cell, sg, atom)
 
         try:
             with open(submit_script, "wt") as f:
