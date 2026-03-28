@@ -10,5 +10,8 @@ dependencies = [
   "gemmi",
 ]
 
+[project.scripts]
+spread-gui = "spread_gui.app:main"
+
 [tool.uv]
 package = true
