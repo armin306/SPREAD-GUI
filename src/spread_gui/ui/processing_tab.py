@@ -238,13 +238,13 @@ class ProcessingTab(QWidget):
         wg.addWidget(QLabel("Wedge size:"), 0, 0)
         self.wedge_size = QSpinBox()
         self.wedge_size.setRange(1, 1000000)
-        self.wedge_size.setValue(30)
+        self.wedge_size.setValue(300)
         wg.addWidget(self.wedge_size, 0, 1)
 
         wg.addWidget(QLabel("Total number of images:"), 0, 2)
         self.total_images = QSpinBox()
         self.total_images.setRange(1, 100000000)
-        self.total_images.setValue(360)
+        self.total_images.setValue(3600)
         wg.addWidget(self.total_images, 0, 3)
 
         self.wedge_preview = QLabel("")
@@ -904,7 +904,7 @@ xia2 pipeline=3dii \\
             self,
             "Wilson SSH password",
             "Enter your Wilson (DLS) password to copy your SSH key:",
-            QInputDialog.InputMode.Password,
+            QLineEdit.EchoMode.Password,
         )
         if not ok or not password:
             return
