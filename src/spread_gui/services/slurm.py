@@ -33,6 +33,52 @@ def run_sbatch(cmd: List[str], cwd: str, dry_run: bool) -> Tuple[int, str, str]:
     return p.returncode, out, err
 
 
+def check_ssh_key_auth(gateway: str = _SLURM_GATEWAY) -> bool:
+    """Return True if passwordless SSH to the gateway node works."""
+    result = subprocess.run(
+        ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", gateway, "exit"],
+        capture_output=True,
+    )
+    return result.returncode == 0
+
+
+def setup_ssh_key(password: str, gateway: str = _SLURM_GATEWAY) -> None:
+    """Copy the user's SSH public key to the gateway using a Qt-supplied password.
+
+    The password is passed to ssh-copy-id via SSH_ASKPASS so it never appears
+    on the terminal.  The temporary askpass script is deleted immediately after.
+    """
+    import tempfile
+
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".sh", delete=False) as fh:
+        fh.write(f"#!/bin/sh\nprintf '%s\\n' {shlex.quote(password)}\n")
+        askpass_path = fh.name
+
+    try:
+        os.chmod(askpass_path, 0o700)
+        env = os.environ.copy()
+        env["SSH_ASKPASS"] = askpass_path
+        env["SSH_ASKPASS_REQUIRE"] = "force"
+        env.setdefault("DISPLAY", ":0")
+
+        result = subprocess.run(
+            ["ssh-copy-id", gateway],
+            capture_output=True,
+            text=True,
+            env=env,
+            start_new_session=True,
+            timeout=30,
+        )
+    finally:
+        try:
+            os.unlink(askpass_path)
+        except Exception:
+            pass
+
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr.strip() or result.stdout.strip())
+
+
 def get_slurm_jwt(lifespan: int = 300) -> str:
     """SSH to the gateway node and retrieve a short-lived SLURM JWT token."""
     result = subprocess.run(

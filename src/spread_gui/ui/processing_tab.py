@@ -27,6 +27,7 @@ from PyQt6.QtWidgets import (
     QTextEdit,
     QMessageBox,
     QCheckBox,
+    QInputDialog,
 )
 
 from spread_gui.core.model import Cell
@@ -42,6 +43,8 @@ from spread_gui.services.slurm import (
     run_sbatch,
     get_slurm_jwt,
     submit_job_via_rest_api,
+    check_ssh_key_auth,
+    setup_ssh_key,
 )
 
 _CONFIG_PATH = Path.home() / ".config" / "spread_gui" / "settings.ini"
@@ -68,6 +71,7 @@ class ProcessingTab(QWidget):
         self._load_settings()
         self._refresh_previews_and_validation()
         self._schedule_energy_scan()
+        self._check_ssh_key_status()
 
     # ---------------- UI ----------------
     def _build_ui(self) -> None:
@@ -263,26 +267,30 @@ class ProcessingTab(QWidget):
         pr.addStretch(1)
         p_vbox.addLayout(pr)
 
-        atom_row = QHBoxLayout()
-        atom_row.addWidget(QLabel("Atom (xia2 only):"))
-        self.atom_edit = QLineEdit()
-        self.atom_edit.setPlaceholderText("e.g. se, fe  (leave blank to omit)")
-        self.atom_edit.setMaximumWidth(220)
-        atom_row.addWidget(self.atom_edit)
-        atom_row.addStretch(1)
-        p_vbox.addLayout(atom_row)
-
         root.addWidget(p_box)
 
         # Submission method
         sub_box = QGroupBox("Submission method")
-        sub_row = QHBoxLayout(sub_box)
+        sub_vbox = QVBoxLayout(sub_box)
+
+        sub_row = QHBoxLayout()
         self.rb_submit_rest = QRadioButton("REST API (recommended)")
         self.rb_submit_sbatch = QRadioButton("sbatch (run on Wilson as fallback)")
         self.rb_submit_rest.setChecked(True)
         sub_row.addWidget(self.rb_submit_rest)
         sub_row.addWidget(self.rb_submit_sbatch)
         sub_row.addStretch(1)
+        sub_vbox.addLayout(sub_row)
+
+        key_row = QHBoxLayout()
+        self.ssh_key_status = QLabel("SSH key: unknown")
+        self.ssh_key_status.setStyleSheet("color:#666;")
+        self.btn_setup_ssh_key = QPushButton("Setup SSH key…")
+        key_row.addWidget(self.ssh_key_status)
+        key_row.addWidget(self.btn_setup_ssh_key)
+        key_row.addStretch(1)
+        sub_vbox.addLayout(key_row)
+
         root.addWidget(sub_box)
 
         # Actions
@@ -347,6 +355,7 @@ class ProcessingTab(QWidget):
         self.btn_generate.clicked.connect(self.generate_scripts)
         self.btn_submit.clicked.connect(self.submit_jobs)
         self.btn_save_log.clicked.connect(self._save_log)
+        self.btn_setup_ssh_key.clicked.connect(self._setup_ssh_key)
 
     # ---------------- Defaults ----------------
     def _apply_defaults_from_cwd(self) -> None:
@@ -379,7 +388,6 @@ class ProcessingTab(QWidget):
             ("data_path", self.data_path_edit),
             ("proc_path", self.proc_path_edit),
             ("energy_list", self.energy_list_edit),
-            ("atom", self.atom_edit),
         ):
             if key in s:
                 widget.setText(s[key])
@@ -439,7 +447,6 @@ class ProcessingTab(QWidget):
             "crystal": self.crystal_edit.text(),
             "data_path": self.data_path_edit.text(),
             "proc_path": self.proc_path_edit.text(),
-            "atom": self.atom_edit.text(),
             "pipeline": self._pipeline_key(),
             "submit_method": "rest" if self.rb_submit_rest.isChecked() else "sbatch",
             "dry_run": str(self.chk_dry_run.isChecked()),
@@ -778,8 +785,8 @@ WEDGE_LIST="{wedge_list}"
 counter=0
 for energy in ${{ENERGY_LIST}}; do
   counter=$((counter+1))
-  for angle in ${{WEDGE_LIST}}; do
-    sbatch {pipeline_script} "$energy" "$angle" "$counter"
+  for images in ${{WEDGE_LIST}}; do
+    sbatch {pipeline_script} "$energy" "$images" "$counter"
   done
 done
 """
@@ -798,23 +805,22 @@ module load autoPROC
 BASE_DIR=$(pwd)
 DATA_DIR="{data_dir}"
 energy=$1
-angle=$2
+images=$2
 counter=$3
 energy_dir="${{BASE_DIR}}/${{energy}}eV"
-angle_dir="${{energy_dir}}/${{angle}}deg"
-mkdir -p "$angle_dir"
-cd "$angle_dir" || exit 1
+images_dir="${{energy_dir}}/${{images}}img"
+mkdir -p "$images_dir"
+cd "$images_dir" || exit 1
 [ -f "aP.log" ] && rm "aP.log"
 rm -rf autoPROC
 process -M DiamondI23 \\
-  -Id "name,${{DATA_DIR}},${{energy}}_E${{counter}}_1_#####.cbf,1,${{angle}}0" \\
+  -Id "name,${{DATA_DIR}},${{energy}}_E${{counter}}_1_#####.cbf,1,${{images}}" \\
   -d autoPROC \\
   cell="{cell.as_autoproc_string()}" \\
   symm="{sg}" > aP.log
 """
 
-    def _make_xia2_dials_job(self, data_dir: str, cell: Cell, sg: str, atom: str) -> str:
-        atom_line = f"  atom={atom.strip()} \\\n" if atom.strip() else ""
+    def _make_xia2_dials_job(self, data_dir: str, cell: Cell, sg: str) -> str:
         return f"""#!/bin/bash
 . /etc/profile.d/modules.sh
 #SBATCH --job-name=xia2_dials_job
@@ -828,22 +834,27 @@ module load xia2
 BASE_DIR=$(pwd)
 DATA_DIR="{data_dir}"
 energy=$1
-angle=$2
+images=$2
 counter=$3
 energy_dir="${{BASE_DIR}}/${{energy}}eV"
-angle_dir="${{energy_dir}}/${{angle}}deg"
-mkdir -p "$angle_dir"
-cd "$angle_dir" || exit 1
-mkdir -p dials
-cd dials
+images_dir="${{energy_dir}}/${{images}}img"
+mkdir -p "$images_dir"
+cd "$images_dir" || exit 1
+mkdir -p xia2-dials
+cd xia2-dials
 xia2 pipeline=dials \\
-  image=${{DATA_DIR}}/${{energy}}_E${{counter}}_1_00001.cbf:1:${{angle}}0 \\
-{atom_line}  space_group="{sg}" \\
-  unit_cell="{cell.as_autoproc_string()}"
+  image=${{DATA_DIR}}/${{energy}}_E${{counter}}_1_00001.cbf:1:${{images}} \\
+  read_all_image_headers=False \\
+  trust_beam_centre=True \\
+  keep_outliers=True \\
+  anomalous=True \\
+  space_group="{sg}" \\
+  unit_cell="{cell.as_autoproc_string()}" \\
+  project=from_GUI \\
+  crystal=from_GUI
 """
 
-    def _make_xia2_3dii_job(self, data_dir: str, cell: Cell, sg: str, atom: str) -> str:
-        atom_line = f"  atom={atom.strip()} \\\n" if atom.strip() else ""
+    def _make_xia2_3dii_job(self, data_dir: str, cell: Cell, sg: str) -> str:
         return f"""#!/bin/bash
 . /etc/profile.d/modules.sh
 #SBATCH --job-name=xia2_3dii_job
@@ -857,19 +868,53 @@ module load xia2
 BASE_DIR=$(pwd)
 DATA_DIR="{data_dir}"
 energy=$1
-angle=$2
+images=$2
 counter=$3
 energy_dir="${{BASE_DIR}}/${{energy}}eV"
-angle_dir="${{energy_dir}}/${{angle}}deg"
-mkdir -p "$angle_dir"
-cd "$angle_dir" || exit 1
+images_dir="${{energy_dir}}/${{images}}img"
+mkdir -p "$images_dir"
+cd "$images_dir" || exit 1
 mkdir -p xia2-3dii
 cd xia2-3dii
 xia2 pipeline=3dii \\
-  image=${{DATA_DIR}}/${{energy}}_E${{counter}}_1_00001.cbf:1:${{angle}}0 \\
-{atom_line}  space_group="{sg}" \\
-  unit_cell="{cell.as_autoproc_string()}"
+  image=${{DATA_DIR}}/${{energy}}_E${{counter}}_1_00001.cbf:1:${{images}} \\
+  read_all_image_headers=False \\
+  trust_beam_centre=True \\
+  keep_outliers=True \\
+  anomalous=True \\
+  space_group="{sg}" \\
+  unit_cell="{cell.as_autoproc_string()}" \\
+  project=from_GUI \\
+  crystal=from_GUI
 """
+
+    # ---------------- SSH key helpers ----------------
+    def _check_ssh_key_status(self) -> None:
+        if check_ssh_key_auth():
+            self.ssh_key_status.setText("SSH key: OK (passwordless)")
+            self.ssh_key_status.setStyleSheet("color:green;")
+            self.btn_setup_ssh_key.setText("Re-setup SSH key…")
+        else:
+            self.ssh_key_status.setText("SSH key: not configured — password required on submit")
+            self.ssh_key_status.setStyleSheet("color:#b05000;")
+            self.btn_setup_ssh_key.setText("Setup SSH key…")
+
+    def _setup_ssh_key(self) -> None:
+        password, ok = QInputDialog.getText(
+            self,
+            "Wilson SSH password",
+            "Enter your Wilson (DLS) password to copy your SSH key:",
+            QInputDialog.InputMode.Password,
+        )
+        if not ok or not password:
+            return
+        try:
+            setup_ssh_key(password)
+        except Exception as e:
+            self._warn("SSH key setup failed", str(e))
+            return
+        self._check_ssh_key_status()
+        self._log("SSH key copied to Wilson — future submissions will not require a password.")
 
     def generate_scripts(self) -> None:
         try:
@@ -882,7 +927,6 @@ xia2 pipeline=3dii \\
         proc_dir = self.proc_path_edit.text().strip()
         cell = self._current_cell()
         sg = normalize_sg_name(self.sg_combo.currentText())
-        atom = self.atom_edit.text().strip()
 
         submit_script, ap, dials, d3 = self._script_paths()
 
@@ -895,8 +939,8 @@ xia2 pipeline=3dii \\
 
         driver = self._make_driver_script(energies, wedges, pipeline_script)
         ap_txt = self._make_autoproc_job(data_dir, cell, sg)
-        dials_txt = self._make_xia2_dials_job(data_dir, cell, sg, atom)
-        d3_txt = self._make_xia2_3dii_job(data_dir, cell, sg, atom)
+        dials_txt = self._make_xia2_dials_job(data_dir, cell, sg)
+        d3_txt = self._make_xia2_3dii_job(data_dir, cell, sg)
 
         try:
             with open(submit_script, "wt") as f:
