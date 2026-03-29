@@ -77,12 +77,17 @@ class ProcessingTab(QWidget):
     def _build_ui(self) -> None:
         root = QVBoxLayout(self)
 
+        title_row = QHBoxLayout()
         title = QLabel("SPREAD – Processing")
         f = QFont()
         f.setPointSize(12)
         f.setBold(True)
         title.setFont(f)
-        root.addWidget(title)
+        title_row.addWidget(title)
+        title_row.addStretch(1)
+        self.btn_new_project = QPushButton("New Project")
+        title_row.addWidget(self.btn_new_project)
+        root.addLayout(title_row)
 
         # Visit / Project
         visit_box = QGroupBox("Visit / Project")
@@ -352,6 +357,7 @@ class ProcessingTab(QWidget):
         self.wedge_size.valueChanged.connect(self._refresh_previews_and_validation)
         self.total_images.valueChanged.connect(self._refresh_previews_and_validation)
 
+        self.btn_new_project.clicked.connect(self._new_project)
         self.btn_generate.clicked.connect(self.generate_scripts)
         self.btn_submit.clicked.connect(self.submit_jobs)
         self.btn_save_log.clicked.connect(self._save_log)
@@ -388,9 +394,31 @@ class ProcessingTab(QWidget):
             ("data_path", self.data_path_edit),
             ("proc_path", self.proc_path_edit),
             ("energy_list", self.energy_list_edit),
+            ("pdb_path", self.pdb_path_edit),
+            ("pdb_code", self.pdb_code_edit),
         ):
             if key in s:
                 widget.setText(s[key])
+
+        pdb_mode = s.get("pdb_mode", "")
+        if pdb_mode == "code":
+            self.rb_pdb_code.setChecked(True)
+        elif pdb_mode == "file":
+            self.rb_pdb_file.setChecked(True)
+
+        sg = s.get("space_group", "")
+        if sg:
+            idx = self.sg_combo.findText(sg)
+            if idx >= 0:
+                self.sg_combo.setCurrentIndex(idx)
+
+        cell_keys = ["cell_a", "cell_b", "cell_c", "cell_alpha", "cell_beta", "cell_gamma"]
+        for i, key in enumerate(cell_keys):
+            if key in s:
+                try:
+                    self.cell_spins[i].setValue(float(s[key]))
+                except ValueError:
+                    pass
 
         pipeline = s.get("pipeline", "")
         if pipeline == "xia2_dials":
@@ -441,12 +469,18 @@ class ProcessingTab(QWidget):
 
     def save_settings(self) -> None:
         cfg = configparser.ConfigParser()
+        cell_keys = ["cell_a", "cell_b", "cell_c", "cell_alpha", "cell_beta", "cell_gamma"]
         cfg["spread_gui"] = {
             "visit": self.visit_edit.text(),
             "project": self.project_edit.text(),
             "crystal": self.crystal_edit.text(),
             "data_path": self.data_path_edit.text(),
             "proc_path": self.proc_path_edit.text(),
+            "pdb_mode": "code" if self.rb_pdb_code.isChecked() else "file",
+            "pdb_path": self.pdb_path_edit.text(),
+            "pdb_code": self.pdb_code_edit.text(),
+            "space_group": self.sg_combo.currentText(),
+            **{cell_keys[i]: str(self.cell_spins[i].value()) for i in range(6)},
             "pipeline": self._pipeline_key(),
             "submit_method": "rest" if self.rb_submit_rest.isChecked() else "sbatch",
             "dry_run": str(self.chk_dry_run.isChecked()),
@@ -820,7 +854,7 @@ process -M DiamondI23 \\
   symm="{sg}" > aP.log
 """
 
-    def _make_xia2_dials_job(self, data_dir: str, cell: Cell, sg: str) -> str:
+    def _make_xia2_dials_job(self, data_dir: str, cell: Cell, sg: str, project: str, crystal: str) -> str:
         return f"""#!/bin/bash
 . /etc/profile.d/modules.sh
 #SBATCH --job-name=xia2_dials_job
@@ -850,11 +884,11 @@ xia2 pipeline=dials \\
   anomalous=True \\
   space_group="{sg}" \\
   unit_cell="{cell.as_autoproc_string()}" \\
-  project=from_GUI \\
-  crystal=from_GUI
+  project={project} \\
+  crystal={crystal}
 """
 
-    def _make_xia2_3dii_job(self, data_dir: str, cell: Cell, sg: str) -> str:
+    def _make_xia2_3dii_job(self, data_dir: str, cell: Cell, sg: str, project: str, crystal: str) -> str:
         return f"""#!/bin/bash
 . /etc/profile.d/modules.sh
 #SBATCH --job-name=xia2_3dii_job
@@ -884,9 +918,58 @@ xia2 pipeline=3dii \\
   anomalous=True \\
   space_group="{sg}" \\
   unit_cell="{cell.as_autoproc_string()}" \\
-  project=from_GUI \\
-  crystal=from_GUI
+  project={project} \\
+  crystal={crystal}
 """
+
+    # ---------------- New project ----------------
+    def _new_project(self) -> None:
+        reply = QMessageBox.question(
+            self,
+            "New Project",
+            "Clear all project fields and reset to defaults?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        # Project identity
+        self.visit_edit.clear()
+        self.visit_hint.setText("")
+        self.project_edit.clear()
+        self.crystal_edit.clear()
+
+        # PDB
+        self.rb_pdb_file.setChecked(True)
+        self.pdb_path_edit.clear()
+        self.pdb_code_edit.clear()
+        self.pdb_fetch_status.setText("")
+
+        # Space group and cell
+        self.sg_combo.setCurrentIndex(0)
+        for sp in self.cell_spins:
+            sp.setValue(0.0)
+        self.sg_source.setText("")
+
+        # Paths
+        self.data_path_edit.clear()
+        self.proc_path_edit.clear()
+
+        # Energy
+        self.rb_energy_range.setChecked(True)
+        self.energy_start.setValue(12600.0)
+        self.energy_end.setValue(12610.0)
+        self.energy_inc.setValue(1.0)
+        self.energy_list_edit.clear()
+        self.chk_auto_energies.setChecked(True)
+
+        # Wedge
+        self.wedge_size.setValue(300)
+        self.total_images.setValue(3600)
+
+        self.log.clear()
+        self._refresh_previews_and_validation()
+        self._log("New project — all fields reset to defaults.")
 
     # ---------------- SSH key helpers ----------------
     def _check_ssh_key_status(self) -> None:
@@ -927,6 +1010,8 @@ xia2 pipeline=3dii \\
         proc_dir = self.proc_path_edit.text().strip()
         cell = self._current_cell()
         sg = normalize_sg_name(self.sg_combo.currentText())
+        project = self.project_edit.text().strip() or "PROJECT"
+        crystal = self.crystal_edit.text().strip() or "CRYSTAL"
 
         submit_script, ap, dials, d3 = self._script_paths()
 
@@ -939,8 +1024,8 @@ xia2 pipeline=3dii \\
 
         driver = self._make_driver_script(energies, wedges, pipeline_script)
         ap_txt = self._make_autoproc_job(data_dir, cell, sg)
-        dials_txt = self._make_xia2_dials_job(data_dir, cell, sg)
-        d3_txt = self._make_xia2_3dii_job(data_dir, cell, sg)
+        dials_txt = self._make_xia2_dials_job(data_dir, cell, sg, project, crystal)
+        d3_txt = self._make_xia2_3dii_job(data_dir, cell, sg, project, crystal)
 
         try:
             with open(submit_script, "wt") as f:
