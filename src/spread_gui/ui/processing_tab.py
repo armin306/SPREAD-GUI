@@ -59,6 +59,12 @@ class ProcessingTab(QWidget):
         self._energy_scan_timer.setSingleShot(True)
         self._energy_scan_timer.timeout.connect(self._auto_update_energies_from_data_dir)
 
+        # Auto-save timer — fires 1 s after the last field change
+        self._autosave_timer = QTimer(self)
+        self._autosave_timer.setSingleShot(True)
+        self._autosave_timer.timeout.connect(self.save_settings)
+        self._loading = False  # suppress autosave during startup
+
         self._fs_watcher = QFileSystemWatcher(self)
         self._fs_watcher.directoryChanged.connect(lambda _: self._schedule_energy_scan())
         self._watched_data_dir: Optional[str] = None
@@ -68,7 +74,10 @@ class ProcessingTab(QWidget):
         self._build_ui()
         self._wire_signals()
         self._apply_defaults_from_cwd()
+        self._loading = True
         self._load_settings()
+        self._loading = False
+        self.save_settings()  # write back immediately to upgrade any stale settings file
         self._refresh_previews_and_validation()
         self._schedule_energy_scan()
         self._check_ssh_key_status()
@@ -328,34 +337,62 @@ class ProcessingTab(QWidget):
 
     def _wire_signals(self) -> None:
         self.visit_edit.textChanged.connect(self._validate_visit)
+        self.visit_edit.textChanged.connect(self._schedule_autosave)
 
         self.rb_pdb_file.toggled.connect(self._update_pdb_mode)
         self.rb_pdb_code.toggled.connect(self._update_pdb_mode)
+        self.rb_pdb_file.toggled.connect(self._schedule_autosave)
+        self.rb_pdb_code.toggled.connect(self._schedule_autosave)
         self.btn_browse_pdb.clicked.connect(self._browse_pdb)
         self.btn_fetch_pdb.clicked.connect(self._fetch_pdb)
         self.pdb_path_edit.editingFinished.connect(self._load_pdb_if_possible)
+        self.pdb_path_edit.textChanged.connect(self._schedule_autosave)
+        self.pdb_code_edit.textChanged.connect(self._schedule_autosave)
 
         self.sg_combo.currentTextChanged.connect(self._validate_cell_sg)
+        self.sg_combo.currentTextChanged.connect(self._schedule_autosave)
         for sp in self.cell_spins:
             sp.valueChanged.connect(self._validate_cell_sg)
+            sp.valueChanged.connect(self._schedule_autosave)
 
         self.btn_browse_data.clicked.connect(lambda: self._browse_dir(self.data_path_edit))
         self.btn_browse_proc.clicked.connect(lambda: self._browse_dir(self.proc_path_edit))
+        self.data_path_edit.textChanged.connect(self._schedule_autosave)
+        self.proc_path_edit.textChanged.connect(self._schedule_autosave)
 
         self.data_path_edit.textChanged.connect(self._schedule_energy_scan)
         self.data_path_edit.editingFinished.connect(self._schedule_energy_scan)
 
         self.rb_energy_range.toggled.connect(self._update_energy_mode)
         self.rb_energy_list.toggled.connect(self._update_energy_mode)
+        self.rb_energy_range.toggled.connect(self._schedule_autosave)
+        self.rb_energy_list.toggled.connect(self._schedule_autosave)
         self.chk_auto_energies.toggled.connect(self._auto_energies_toggled)
+        self.chk_auto_energies.toggled.connect(self._schedule_autosave)
 
         self.energy_start.valueChanged.connect(self._refresh_previews_and_validation)
         self.energy_end.valueChanged.connect(self._refresh_previews_and_validation)
         self.energy_inc.valueChanged.connect(self._refresh_previews_and_validation)
         self.energy_list_edit.textChanged.connect(self._refresh_previews_and_validation)
+        self.energy_start.valueChanged.connect(self._schedule_autosave)
+        self.energy_end.valueChanged.connect(self._schedule_autosave)
+        self.energy_inc.valueChanged.connect(self._schedule_autosave)
+        self.energy_list_edit.textChanged.connect(self._schedule_autosave)
 
         self.wedge_size.valueChanged.connect(self._refresh_previews_and_validation)
         self.total_images.valueChanged.connect(self._refresh_previews_and_validation)
+        self.wedge_size.valueChanged.connect(self._schedule_autosave)
+        self.total_images.valueChanged.connect(self._schedule_autosave)
+
+        self.rb_autoproc.toggled.connect(self._schedule_autosave)
+        self.rb_xia2_dials.toggled.connect(self._schedule_autosave)
+        self.rb_xia2_3dii.toggled.connect(self._schedule_autosave)
+        self.rb_submit_rest.toggled.connect(self._schedule_autosave)
+        self.rb_submit_sbatch.toggled.connect(self._schedule_autosave)
+        self.chk_dry_run.toggled.connect(self._schedule_autosave)
+
+        self.project_edit.textChanged.connect(self._schedule_autosave)
+        self.crystal_edit.textChanged.connect(self._schedule_autosave)
 
         self.btn_new_project.clicked.connect(self._new_project)
         self.btn_generate.clicked.connect(self.generate_scripts)
@@ -501,6 +538,10 @@ class ProcessingTab(QWidget):
             self._log(f"Warning: could not save settings to {_CONFIG_PATH}: {e}")
 
     # ---------------- UI helpers ----------------
+    def _schedule_autosave(self) -> None:
+        if not self._loading:
+            self._autosave_timer.start(1000)
+
     def _log(self, msg: str) -> None:
         self.log.append(msg)
         self.log.ensureCursorVisible()
