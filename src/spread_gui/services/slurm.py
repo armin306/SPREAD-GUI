@@ -5,6 +5,7 @@ import os
 import stat
 import shlex
 import subprocess
+from pathlib import Path
 from typing import List, Tuple
 
 try:
@@ -48,11 +49,12 @@ def setup_ssh_key(password: str, gateway: str = _SLURM_GATEWAY) -> None:
     The password is passed to ssh-copy-id via SSH_ASKPASS so it never appears
     on the terminal.  The temporary askpass script is deleted immediately after.
     """
-    import tempfile
+    config_dir = Path.home() / ".config" / "spread_gui"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    askpass_path = str(config_dir / "_askpass.sh")
 
-    with tempfile.NamedTemporaryFile(mode="w", suffix=".sh", delete=False) as fh:
+    with open(askpass_path, "w") as fh:
         fh.write(f"#!/bin/sh\nprintf '%s\\n' {shlex.quote(password)}\n")
-        askpass_path = fh.name
 
     try:
         os.chmod(askpass_path, 0o700)
