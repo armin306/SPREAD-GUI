@@ -631,6 +631,8 @@ class ProcessingTab(QWidget):
             self._watched_data_dir = None
 
     def _auto_update_energies_from_data_dir(self) -> None:
+        if not self.chk_auto_energies.isChecked():
+            return
         data_dir = self.data_path_edit.text().strip()
         self._set_watched_directory(data_dir)
 
