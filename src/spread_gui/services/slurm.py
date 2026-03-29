@@ -53,11 +53,15 @@ def setup_ssh_key(password: str, gateway: str = _SLURM_GATEWAY) -> None:
     config_dir.mkdir(parents=True, exist_ok=True)
     askpass_path = str(config_dir / "_askpass.sh")
 
-    with open(askpass_path, "w") as fh:
-        fh.write(f"#!/bin/sh\nprintf '%s\\n' {shlex.quote(password)}\n")
+    # Write with 0o700 atomically so the file is never world-readable,
+    # even for the brief moment between creation and chmod.
+    script = f"#!/bin/sh\nprintf '%s\\n' {shlex.quote(password)}\n"
+    fd = os.open(askpass_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o700)
+    with os.fdopen(fd, "w") as fh:
+        fh.write(script)
 
     try:
-        os.chmod(askpass_path, 0o700)
+        pass  # permissions already set correctly above
         env = os.environ.copy()
         env["SSH_ASKPASS"] = askpass_path
         env["SSH_ASKPASS_REQUIRE"] = "force"
@@ -73,6 +77,10 @@ def setup_ssh_key(password: str, gateway: str = _SLURM_GATEWAY) -> None:
         )
     finally:
         try:
+            # Overwrite with zeros before deleting so the password is gone
+            # even if deletion fails (e.g. after SIGKILL on a subsequent run).
+            with open(askpass_path, "w") as fh:
+                fh.write("\x00" * len(script))
             os.unlink(askpass_path)
         except Exception:
             pass
