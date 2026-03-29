@@ -1136,7 +1136,8 @@ xia2 pipeline=3dii \\
                 self._warn(
                     "Token error",
                     f"Could not obtain SLURM JWT via SSH to wilson:\n\n{e}\n\n"
-                    "Switch to 'sbatch' mode and run the driver script on Wilson as a fallback.",
+                    "Set up passwordless SSH first using the 'Setup SSH key…' button, "
+                    "or switch to 'sbatch' mode and run the driver script on Wilson as a fallback.",
                 )
                 return
 

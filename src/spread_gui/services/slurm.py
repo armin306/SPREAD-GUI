@@ -84,10 +84,16 @@ def setup_ssh_key(password: str, gateway: str = _SLURM_GATEWAY) -> None:
 def get_slurm_jwt(lifespan: int = 300) -> str:
     """SSH to the gateway node and retrieve a short-lived SLURM JWT token."""
     result = subprocess.run(
-        ["ssh", _SLURM_GATEWAY, f"scontrol token lifespan={lifespan}"],
+        [
+            "ssh",
+            "-o", "BatchMode=yes",
+            "-o", "ConnectTimeout=10",
+            _SLURM_GATEWAY,
+            f"scontrol token lifespan={lifespan}",
+        ],
         capture_output=True,
         text=True,
-        timeout=30,
+        timeout=15,
     )
     if result.returncode != 0:
         raise RuntimeError(
