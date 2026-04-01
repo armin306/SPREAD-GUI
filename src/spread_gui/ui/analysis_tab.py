@@ -5,9 +5,10 @@ import os
 import webbrowser
 from pathlib import Path
 
-from PyQt6.QtCore import QThread, pyqtSignal
+from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from PyQt6.QtGui import QFont
 from PyQt6.QtWidgets import (
+    QDialog,
     QFileDialog,
     QGroupBox,
     QHBoxLayout,
@@ -25,6 +26,63 @@ from PyQt6.QtWidgets import (
 from spread_gui.core.xia2_analysis import collect_results, generate_report
 
 _CONFIG_PATH = Path.home() / ".config" / "spread_gui" / "settings.ini"
+
+
+# ---------------------------------------------------------------------------
+# Existing-results dialog
+# ---------------------------------------------------------------------------
+
+class _ExistingResultsDialog(QDialog):
+    """
+    Shown when the default output directory already exists.
+    Three choices:
+      SHOW      — open the existing HTML in the browser
+      OVERWRITE — re-run and overwrite the existing directory
+      NEW_DIR   — re-run into a user-chosen directory
+    """
+
+    SHOW      = "show"
+    OVERWRITE = "overwrite"
+    NEW_DIR   = "new_dir"
+
+    def __init__(self, out_dir: Path, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Analysis results already exist")
+        self.choice: str | None = None
+
+        layout = QVBoxLayout(self)
+        layout.setSpacing(10)
+
+        msg = QLabel(
+            f"Analysis results already exist in:\n<b>{out_dir}</b>"
+        )
+        msg.setTextFormat(Qt.TextFormat.RichText)
+        msg.setWordWrap(True)
+        layout.addWidget(msg)
+
+        def _btn(label: str, description: str, choice: str) -> None:
+            b = QPushButton(label)
+            b.setToolTip(description)
+            b.clicked.connect(lambda: self._pick(choice))
+            layout.addWidget(b)
+
+        _btn("Show existing results",
+             "Open the existing HTML report in the browser without re-running.",
+             self.SHOW)
+        _btn("Re-run and overwrite",
+             "Delete the existing results and run the analysis again in the same directory.",
+             self.OVERWRITE)
+        _btn("Re-run in a new directory",
+             "Keep the existing results and write the new analysis to a different directory.",
+             self.NEW_DIR)
+
+        cancel = QPushButton("Cancel")
+        cancel.clicked.connect(self.reject)
+        layout.addWidget(cancel)
+
+    def _pick(self, choice: str) -> None:
+        self.choice = choice
+        self.accept()
 
 
 # ---------------------------------------------------------------------------
@@ -210,23 +268,52 @@ class AnalysisTab(QWidget):
 
     def _resolve_out_dir(self, proc_path: str) -> Path | None:
         """
-        Return the output directory to use.
-        If the default already exists, ask the user for an alternative name.
-        Returns None if the user cancels.
+        Determine the output directory.
+
+        If the default doesn't exist yet, return it directly.
+        If it already exists, ask the user via a three-option dialog:
+          • Show results  → open existing HTML, return None (no re-run)
+          • Overwrite     → confirm, return the same directory
+          • New directory → prompt for a name, return that directory
+        Returns None to abort (user cancelled, or "show results" was chosen).
         """
         out_dir = Path(self._default_out_dir())
 
         if not out_dir.exists():
             return out_dir
 
-        # Directory exists — ask for an alternative name.
+        dlg = _ExistingResultsDialog(out_dir, self)
+        if dlg.exec() != QDialog.DialogCode.Accepted or dlg.choice is None:
+            return None
+
+        if dlg.choice == _ExistingResultsDialog.SHOW:
+            html = out_dir / "index.html"
+            if html.exists():
+                webbrowser.open(f"file://{html}")
+            else:
+                QMessageBox.warning(
+                    self, "No report found",
+                    f"index.html not found in:\n{out_dir}\n\n"
+                    "The previous run may have failed. Use 'Re-run' to generate a new report.",
+                )
+            return None
+
+        if dlg.choice == _ExistingResultsDialog.OVERWRITE:
+            ans = QMessageBox.question(
+                self, "Overwrite existing results?",
+                f"All files in:\n{out_dir}\nwill be replaced. Continue?",
+            )
+            if ans != QMessageBox.StandardButton.Yes:
+                return None
+            return out_dir
+
+        # NEW_DIR — ask for a name, loop until it's free
         suggestion = self._pipeline() + "-2"
         while True:
             name, ok = QInputDialog.getText(
                 self,
-                "Output directory already exists",
-                f"\u2018{out_dir}\u2019 already exists.\n\n"
-                "Enter a sub-directory name under results/ to use instead:",
+                "Choose a new output directory",
+                "Enter a sub-directory name under results/:",
                 text=suggestion,
             )
             if not ok:
