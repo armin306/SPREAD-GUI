@@ -8,6 +8,7 @@ dependencies = [
   "PyQt6-sip<14",
   "requests",
   "gemmi",
+  "matplotlib",
 ]
 
 [project.scripts]
