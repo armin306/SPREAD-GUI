@@ -106,14 +106,11 @@ class ProcessingTab(QWidget):
         title_row.addWidget(self.btn_new_project)
         root.addLayout(title_row)
 
-        # Visit / project / crystal fields are managed via the Manage Projects
-        # dialog and the main-window header.  Keep the widgets as hidden
-        # children so that form-state collection, script generation, and
-        # visit validation continue to work without any further changes.
-        self.visit_edit = QLineEdit(self)
-        self.visit_hint = QLabel("", self)
-        self.project_edit = QLineEdit(self)
-        self.crystal_edit = QLineEdit(self)
+        # Visit, project, and crystal are managed via the Manage Projects
+        # dialog and the main-window header; stored as plain attributes.
+        self._visit:   str = ""
+        self._project: str = ""
+        self._crystal: str = ""
 
         # PDB input
         pdb_box = QGroupBox("PDB input")
@@ -333,9 +330,6 @@ class ProcessingTab(QWidget):
         self._update_energy_mode()
 
     def _wire_signals(self) -> None:
-        self.visit_edit.textChanged.connect(self._validate_visit)
-        self.visit_edit.textChanged.connect(self._schedule_autosave)
-
         self.rb_pdb_file.toggled.connect(self._update_pdb_mode)
         self.rb_pdb_code.toggled.connect(self._update_pdb_mode)
         self.rb_pdb_file.toggled.connect(self._schedule_autosave)
@@ -388,9 +382,6 @@ class ProcessingTab(QWidget):
         self.rb_submit_sbatch.toggled.connect(self._schedule_autosave)
         self.chk_dry_run.toggled.connect(self._schedule_autosave)
 
-        self.project_edit.textChanged.connect(self._schedule_autosave)
-        self.crystal_edit.textChanged.connect(self._schedule_autosave)
-
         self.btn_new_project.clicked.connect(self._new_project)
         self.btn_generate.clicked.connect(self.generate_scripts)
         self.btn_submit.clicked.connect(self.submit_jobs)
@@ -402,14 +393,11 @@ class ProcessingTab(QWidget):
         cwd = os.getcwd()
         visit = detect_visit_from_path(cwd)
         if visit:
-            self.visit_edit.setText(visit)
-            self.visit_hint.setText(f"Default from current path: {visit}")
+            self._visit = visit
             root = infer_visit_root(cwd, visit)
             if root:
                 self.data_path_edit.setText(root)
                 self.proc_path_edit.setText(os.path.join(root, "processing", "SPREAD"))
-        else:
-            self.visit_hint.setText("No visit detected in current path (you can enter manually).")
 
     # ---------------- Persistent settings ----------------
     def _load_settings(self) -> None:
@@ -427,9 +415,9 @@ class ProcessingTab(QWidget):
         """Return all form fields as a flat string dict (matches settings.ini keys)."""
         cell_keys = ["cell_a", "cell_b", "cell_c", "cell_alpha", "cell_beta", "cell_gamma"]
         return {
-            "visit":         self.visit_edit.text(),
-            "project":       self.project_edit.text(),
-            "crystal":       self.crystal_edit.text(),
+            "visit":         self._visit,
+            "project":       self._project,
+            "crystal":       self._crystal,
             "data_path":     self.data_path_edit.text(),
             "proc_path":     self.proc_path_edit.text(),
             "pdb_mode":      "code" if self.rb_pdb_code.isChecked() else "file",
@@ -452,10 +440,11 @@ class ProcessingTab(QWidget):
 
     def _apply_form_state(self, s: dict) -> None:
         """Populate form fields from a flat string dict."""
+        if "visit"   in s: self._visit   = s["visit"]
+        if "project" in s: self._project = s["project"]
+        if "crystal" in s: self._crystal = s["crystal"]
+
         for key, widget in (
-            ("visit",        self.visit_edit),
-            ("project",      self.project_edit),
-            ("crystal",      self.crystal_edit),
             ("data_path",    self.data_path_edit),
             ("proc_path",    self.proc_path_edit),
             ("energy_list",  self.energy_list_edit),
@@ -695,11 +684,7 @@ class ProcessingTab(QWidget):
 
     # ---------------- Validation & previews ----------------
     def _validate_visit(self) -> None:
-        txt = self.visit_edit.text().strip()
-        if txt == "":
-            self.visit_edit.setStyleSheet("")
-            return
-        self.visit_edit.setStyleSheet("" if VISIT_RE.match(txt) else "border: 2px solid #c00;")
+        pass  # visit is no longer an editable widget; validated at script-generation time
 
     def _current_cell(self) -> Cell:
         return Cell(
@@ -860,7 +845,7 @@ class ProcessingTab(QWidget):
         return submit_script, ap, dials, d3
 
     def _validate_before_generate(self) -> Tuple[List[int], List[int]]:
-        visit = self.visit_edit.text().strip()
+        visit = self._visit.strip()
         if visit and not VISIT_RE.match(visit):
             raise ValueError("Visit format is invalid.")
 
@@ -1009,11 +994,9 @@ xia2 pipeline=3dii \\
         if reply != QMessageBox.StandardButton.Yes:
             return
 
-        # Project identity
-        self.visit_edit.clear()
-        self.visit_hint.setText("")
-        self.project_edit.clear()
-        self.crystal_edit.clear()
+        self._visit   = ""
+        self._project = ""
+        self._crystal = ""
 
         # PDB
         self.rb_pdb_file.setChecked(True)
@@ -1089,8 +1072,8 @@ xia2 pipeline=3dii \\
         proc_dir = self.proc_path_edit.text().strip()
         cell = self._current_cell()
         sg = normalize_sg_name(self.sg_combo.currentText())
-        project = self.project_edit.text().strip() or "PROJECT"
-        crystal = self.crystal_edit.text().strip() or "CRYSTAL"
+        project = self._project.strip() or "PROJECT"
+        crystal = self._crystal.strip() or "CRYSTAL"
 
         submit_script, ap, dials, d3 = self._script_paths()
 
