@@ -106,25 +106,14 @@ class ProcessingTab(QWidget):
         title_row.addWidget(self.btn_new_project)
         root.addLayout(title_row)
 
-        # Visit / Project
-        visit_box = QGroupBox("Visit / Project")
-        g = QGridLayout(visit_box)
-        g.addWidget(QLabel("Visit:"), 0, 0)
-        self.visit_edit = QLineEdit()
-        self.visit_edit.setPlaceholderText("e.g. mx39247-20")
-        g.addWidget(self.visit_edit, 0, 1)
-        self.visit_hint = QLabel("")
-        self.visit_hint.setStyleSheet("color:#666;")
-        g.addWidget(self.visit_hint, 0, 2)
-
-        g.addWidget(QLabel("Project name:"), 1, 0)
-        self.project_edit = QLineEdit()
-        g.addWidget(self.project_edit, 1, 1, 1, 2)
-
-        g.addWidget(QLabel("Crystal name:"), 2, 0)
-        self.crystal_edit = QLineEdit()
-        g.addWidget(self.crystal_edit, 2, 1, 1, 2)
-        root.addWidget(visit_box)
+        # Visit / project / crystal fields are managed via the Manage Projects
+        # dialog and the main-window header.  Keep the widgets as hidden
+        # children so that form-state collection, script generation, and
+        # visit validation continue to work without any further changes.
+        self.visit_edit = QLineEdit(self)
+        self.visit_hint = QLabel("", self)
+        self.project_edit = QLineEdit(self)
+        self.crystal_edit = QLineEdit(self)
 
         # PDB input
         pdb_box = QGroupBox("PDB input")
