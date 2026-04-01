@@ -20,6 +20,7 @@ from PyQt6.QtWidgets import (
     QFileDialog,
     QGroupBox,
     QRadioButton,
+    QDoubleSpinBox,
     QSpinBox,
     QTextEdit,
     QMessageBox,
