@@ -1,22 +1,25 @@
 # SPREAD-GUI
-A GUI to streamline processing of wavelength interleaved data followed by SPREAD analysis.
 
-# SPREAD GUI Documentation
+A PyQt6 desktop application for managing and submitting wavelength-interleaved SPREAD data-collection processing jobs on the I23 beamline at Diamond Light Source, and for analysing the resulting xia2 output.
 
-This repository contains documentation for the **SPREAD Processing Pipeline GUI**, developed for the I23 beamline at Diamond Light Source.
+## Quick start
 
-## Contents
+```bash
+uv run spread-gui
+```
 
-- `docs/spread-gui-functional-specification.md`  
-  Functional specification describing the current implemented behaviour of the SPREAD GUI.
+Python 3.10+ and PyQt6 are required. All other dependencies are managed by `uv`.
+
+## Documentation
+
+- [docs/spread-gui-functional-specification.md](docs/spread-gui-functional-specification.md)  
+  Full functional specification of the implemented behaviour.
 
 ## Audience
 
-- I23 beamline scientists
-- I23 beamline users
-- Scientific software developers
-  
+- I23 beamline scientists and users
+- Scientific software developers maintaining or extending the GUI
 
 ## Status
 
-This documentation reflects the **current implemented behaviour** as of March 2026.
+Current implemented behaviour as of April 2026.

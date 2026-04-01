@@ -1,247 +1,341 @@
+# SPREAD GUI – Functional Specification
 
-SPREAD GUI – Functional Specification (DLS Software Documentation Aligned)
-Document Control
+| Field          | Value                                         |
+|----------------|-----------------------------------------------|
+| Document owner | Armin Wagner                                  |
+| Application    | SPREAD Processing Pipeline GUI                |
+| Status         | Current implementation                        |
+| Last updated   | April 2026                                    |
+| Audience       | Beamline scientists, software developers      |
 
-Field	Value
-Document owner	Armin Wagner
-Application	SPREAD Processing Pipeline GUI
-Repository	Privat
-Status	Current implementation
-Last updated	March 2026
-Audience	Beamline scientists, scientific software developers, maintainers
+---
 
+## 1. Purpose
 
+This document describes the current implemented functionality of the SPREAD Processing Pipeline GUI. It is intended to support operational use on the I23 beamline, software maintenance, and technical review.
 
-1. Purpose
-This document describes the current implemented functionality of the SPREAD Processing Pipeline GUI. It is intended to support:
+---
 
-Operational use on the I23 beamline
-Software maintenance and handover
-Review during technical discussions and internal audits
-This document follows the Diamond Light Source software documentation conventions, focusing on behaviour, interfaces, and operational robustness rather than future design proposals.
+## 2. Scope
 
+**In scope**
 
-2. Scope
-In scope
+- User-visible GUI behaviour
+- Project and crystal management (database)
+- Processing parameter configuration, script generation, and job submission
+- xia2 output analysis and report generation
+- Platform and operational constraints
 
-User-visible GUI behaviour
-Processing logic and validation rules
-Script generation and job submission
-Platform and operational constraints
-Out of scope
+**Out of scope**
 
-Algorithmic details of SPREAD itself
-Analysis or post-processing workflows
-Future or proposed features not yet implemented
+- Algorithmic details of SPREAD itself
+- Future or proposed features not yet implemented
 
+---
 
-3. Intended Users
+## 3. Intended Users
 
-Beamline scientists and users configuring and submitting SPREAD processing and analysis
-Scientific software developers maintaining or extending the GUI
-Support staff diagnosing operational issues
-Users are assumed to be familiar with:
+- Beamline scientists and users configuring and submitting SPREAD processing jobs
+- Scientific software developers maintaining or extending the GUI
+- Support staff diagnosing operational issues
 
-Diamond visit structure
-SLURM job submission
-Crystallographic terminology (space group, unit cell, energies, wedges)
+Users are assumed to be familiar with Diamond visit structure, SLURM job submission, and crystallographic terminology (space group, unit cell, energies, wedges).
 
+---
 
-4. System Overview
-The SPREAD GUI is a PyQt6 desktop application providing a structured interface to:
+## 4. System Overview
 
-Collect and validate processing parameters
-Automatically derive energies and metadata from collected data
-Generate SLURM-compatible job scripts
-Optionally submit jobs to the Diamond compute cluster
-The application is designed for interactive use on Diamond workstations and via remote NX sessions.
+The SPREAD GUI is a PyQt6 desktop application that provides a structured interface to:
 
+- Organise data collections into projects and crystals with a persistent SQLite database
+- Define processing parameters (energies, wedges, pipeline, paths)
+- Generate SLURM-compatible job scripts
+- Optionally submit jobs to the Diamond compute cluster via REST API or `sbatch`
+- Analyse xia2 output across energy points and generate an HTML report with plots
 
-5. Software Architecture
-5.1 Entry Point
+The application is designed for interactive use on Diamond Linux workstations and via remote NX sessions.
 
-main() initialises QApplication
-MainWindow is instantiated as the top-level container
+---
 
-5.2 Major Components
+## 5. Software Architecture
 
-Component	Responsibility
-MainWindow	Application shell, menu, status bar
-ProcessingTab	Primary functional interface
-AnalysisTab	Placeholder (non-functional)
+### 5.1 Entry Point
 
-5.3 Layout and Usability
+`spread_gui.app.main()` initialises `QApplication` and instantiates `MainWindow`.
 
-ProcessingTab is embedded in a QScrollArea
-Ensures usability on laptops and small displays
-No hard-coded window size assumptions
+### 5.2 Major Components
 
+| Component              | Responsibility                                                  |
+|------------------------|-----------------------------------------------------------------|
+| `MainWindow`           | Application shell, header bar, tab container, status bar        |
+| `ProcessingTab`        | Energy/wedge/pipeline configuration, script generation, submission |
+| `AnalysisTab`          | xia2 result parsing and HTML report generation                  |
+| `ManageProjectsDialog` | Two-pane project/crystal browser; crystal creation and deletion |
+| `SgCellDialog`         | Space group and unit cell definition (three input methods)      |
+| `ProjectDB`            | SQLite-backed persistence for projects, crystals, and settings  |
 
-6. Operational Workflow
+### 5.3 Layout
 
-User launches GUI within a Diamond visit context
-Visit, data, and processing paths are auto-detected
-PDB and crystallographic metadata are loaded and validated
-Energies and wedges are defined (manually or automatically)
-Processing pipeline is selected
-Job scripts are generated
-Jobs are optionally submitted via SLURM
+- `ProcessingTab` is embedded in a `QScrollArea` for usability on small displays.
+- `MainWindow` carries a persistent header bar visible on all tabs.
+- SSH check and other slow operations are deferred via `QTimer.singleShot(0, …)` so the window paints before blocking.
 
+---
 
-7. Functional Specification
-7.1 Visit, Project, and Crystal Identification
-Behaviour:
+## 6. Persistent Storage
 
-Visit ID auto-detected from current working directory
-Validation against pattern: `^[a-z]{2}[0-9]{5}-[0-9]{1,3}
-Manual override always permitted
-Derived paths:
+### 6.1 SQLite Database
 
-Data path: visit root
-Processing path: <visit>/processing/SPREAD
+Location: `~/.config/spread_gui/projects.db`
 
+Schema:
 
-7.2 PDB Input and Metadata Extraction
-Supported modes:
+```
+projects  (id, name, created_at)
+crystals  (id, project_id, name, visit, data_path, proc_path,
+           settings TEXT,   -- JSON blob of all form fields
+           created_at, updated_at)
+```
 
-Local PDB file upload
-Fetch by 4-character PDB code (RCSB)Implemented behaviour:
-Parse CRYST1 record
-Extract unit cell and space group
-Attempt automatic space-group matching
-GUI indicates provenance of values
+- Crystals are deleted automatically when their parent project is deleted (`ON DELETE CASCADE`).
+- The `settings` JSON uses the same key names as `settings.ini` so either source can populate the form without conversion.
 
+### 6.2 INI Settings File
 
-7.3 Space Group and Unit Cell Validation
-Implementation:
+Location: `~/.config/spread_gui/settings.ini`
 
-Space group list populated with all 230 Hermann–Mauguin symbols
-Generated dynamically using gemmi when availableValidation rules:
-Unit cell parameters are editable
-Compatibility checks performed in real time
-Visual feedback:Green: compatible
-Red: incompatible, with explanation
+Stores the same flat key-value dict as the DB settings blob. Used to restore the last-used crystal and form state on startup. Auto-saved one second after the last field change.
 
+---
 
-7.4 Energy Definition
-7.4.1 Manual Definition
+## 7. Header Bar
 
-Range mode: start / end / increment
-List mode: comma- or space-separated values
-All energies are internally stored as integers
-7.4.2 Automatic Energy Detection
-Source:
+Displayed above all tabs; updated automatically whenever a crystal is loaded or any field changes.
 
-Filenames in the selected Data path
-Expected filename pattern:
-<energy>_E<counter>_1_#####.cbf
+| Field         | Description                                   |
+|---------------|-----------------------------------------------|
+| Project       | Name of the currently loaded project          |
+| Crystal       | Name of the currently loaded crystal          |
+| Data path     | Path to raw data (selectable, not editable)   |
+| Proc path     | Path to processing output (selectable)        |
+| Space group   | Hermann–Mauguin symbol                        |
+| Unit cell     | a, b, c, α, β, γ                             |
 
+All fields show `—` when no crystal is loaded or the value is not yet defined.
 
+A **Manage Projects…** button in the top-right opens the project/crystal browser.
 
-Behaviour:
+---
 
-Regex-based extraction
-Conversion to integer values
-De-duplication and sorting
-Dynamic updates:
+## 8. Project and Crystal Management
 
-Triggered on Data path edits (debounced)
-Triggered on directory content changes (QFileSystemWatcher)
-User control:
+### 8.1 Manage Projects Dialog
 
-Checkbox: Auto-detect energies from Data path (default: ON)
+A two-pane browser (minimum 1000 × 450 px):
 
-When enabled:Energy mode forced to List
-Manual editing disabled
+- **Left pane** – all projects, alphabetically sorted. A bullet (●) marks the project of the currently loaded crystal.
+- **Right pane** – crystals within the selected project. A bullet marks the currently loaded crystal.
 
+Actions available:
 
-7.5 Wedge Definition
-Parameters:
+| Button            | Behaviour                                                                 |
+|-------------------|---------------------------------------------------------------------------|
+| + New (project)   | Prompts for a name; creates and selects the new project                   |
+| ✕ Delete (project)| Confirms deletion; cascades to all crystals in that project              |
+| + New (crystal)   | Opens the New Crystal sub-dialog; pre-fills from current form state       |
+| ✕ Delete (crystal)| Confirms deletion                                                         |
+| Set SG & Cell…    | Opens `SgCellDialog` for the selected crystal; enabled when a crystal is selected |
+| Load Crystal      | Confirms, saves current state, loads the selected crystal                 |
+| Close             | Closes without loading                                                    |
 
-Wedge size (images per wedge)
-Total number of images
-Defaults:
+Double-clicking a crystal row is equivalent to **Load Crystal**.
 
-Wedge size: 30
-Total images: 360
-Derived output:
+When **Load Crystal** is accepted, the caller saves the current settings first, then calls `load_crystal()` which applies the stored settings, syncs the INI file, and emits `crystal_context_changed` and `processing_info_changed` signals.
 
-Wedge list generated automatically
-Preview displayed in GUI
+If **Set SG & Cell…** was used for the currently loaded crystal, the dialog sets an internal `_needs_reload` flag so `MainWindow` reloads the crystal automatically on close, without requiring an explicit Load action.
 
+### 8.2 New Crystal Dialog
 
-7.6 Processing Pipeline Selection
-Supported pipelines:
+Fields: crystal name, visit, data path, processing path (with Browse buttons for paths). Pre-filled from the current form state where applicable.
 
-AutoProc
-Xia2 DIALS
-Xia2 3dii
-Pipeline selection determines the job script template used.
+### 8.3 Space Group and Unit Cell – SgCellDialog
 
+Three input methods selectable via radio buttons:
 
-7.7 Script Generation
-Generated artefacts:
+| Method        | Behaviour                                                                                   |
+|---------------|---------------------------------------------------------------------------------------------|
+| Upload PDB file | Browse to a local `.pdb` file; click **Load** to parse the CRYST1 record; preview shown  |
+| PDB code      | Enter a 4-character code; click **Fetch** to download from RCSB and parse CRYST1; preview shown |
+| Manual        | Select space group from a dropdown of all 230 Hermann–Mauguin symbols; enter a, b, c, α, β, γ; real-time compatibility validation |
 
-File	Purpose
-run_spread_submit.sh	Driver script
-autoproc_jobs.sh	AutoProc jobs
-xia2_dials_jobs.sh	Xia2 DIALS jobs
-xia2_3dii_jobs.sh	Xia2 3dii jobs
+For file and code methods, **Apply** is disabled until a successful parse. For manual entry, **Apply** is always enabled. On accept, the result is written to the crystal's DB settings via `patch_crystal_settings()`.
 
-Characteristics:
+---
 
-Energies passed as integers
-Scripts marked executable
-Filename templates aligned with detected data
+## 9. Processing Tab
 
+### 9.1 Energy Definition
 
-7.8 Job Submission
+**Range mode** (default): start / end / increment. All values stored as integers.
 
-Submission via sbatch is optional
-Dry-run mode enabled by default
-All commands logged
-Progress reporting:
+**List mode**: comma- or space-separated integer values.
 
-Total jobs = len(energies) × len(wedges)
-Status bar displays percentage completion
+**Auto-detect** (checkbox, default ON):
+- Scans the crystal's data path for files matching `<energy>_E<counter>_1_#####.cbf`
+- Extracts, de-duplicates, and sorts energy values
+- Forces list mode; disables manual editing
+- Triggered on crystal load and by a `QFileSystemWatcher` on the data directory (debounced 300 ms)
 
+### 9.2 Wedge Definition
 
-8. Logging and Diagnostics
+| Parameter            | Default |
+|----------------------|---------|
+| Wedge size (images)  | 300     |
+| Total images         | 3600    |
 
-Central log panel records all major actions
-Includes:Script generation
-Dry-run commands
-Submission output
-Validation warnings
-Logging is intended for user transparency and first-line support diagnostics.
+The derived wedge list is previewed in the UI.
 
+### 9.3 Processing Pipeline
 
-9. Platform and Deployment Considerations
+| Option      | SLURM script template        |
+|-------------|------------------------------|
+| AutoProc    | `autoproc_jobs.sh`           |
+| Xia2 DIALS  | `xia2_dials_jobs.sh`         |
+| Xia2 3dii   | `xia2_3dii_jobs.sh`          |
 
-Designed for Diamond Linux workstations
-Supports remote X11 (ssh -Y)
-Safeguards include:Forcing QT_QPA_PLATFORM=xcb
-Disabling problematic OpenGL initialisation
-No installer is required; application is run from the managed environment.
+### 9.4 Submission Method
 
+| Option                          | Behaviour                                           |
+|---------------------------------|-----------------------------------------------------|
+| REST API (recommended)          | SSH to `wilson`, obtain SLURM JWT, POST to DLS REST API |
+| sbatch (fallback)               | Run `sbatch` locally (requires Wilson shell access) |
 
-10. Limitations
+**Dry run** checkbox (default ON) — logs the commands that would be submitted without actually submitting.
 
-Single filename pattern supported
-No persistent user settings
-Analysis tab not implemented
-No batch handling of multiple crystals
+### 9.5 SSH Key Status
 
+The status label shows whether passwordless SSH to `wilson` is configured, using `BatchMode=yes` with a 5-second timeout. The exact SSH error is shown as a tooltip when auth fails.
 
-11. Support and Maintenance Notes
+**Setup SSH key…** prompts for the DLS password and runs `ssh-copy-id` via `SSH_ASKPASS` so the password is never exposed on the terminal. The temporary askpass script is zero-overwritten and deleted immediately after use.
 
-Issues should be reproducible using dry-run mode
-Logs should be attached to support requests
-Code changes should preserve integer-energy handling
+All SSH calls use `-o StrictHostKeyChecking=accept-new` to silently accept host keys on first connection.
 
+---
 
-12. Change History
+## 10. Script Generation
 
-Date	Change
-Mar 2026	Aligned with DLS software documentation conventions
+### 10.1 Generated Files
 
+All files are written to the crystal's processing path.
+
+| File                    | Purpose                                  |
+|-------------------------|------------------------------------------|
+| `run_spread_submit.sh`  | Driver: iterates over energies and wedges, calls the pipeline script via `sbatch` |
+| `autoproc_jobs.sh`      | AutoProc SLURM job template              |
+| `xia2_dials_jobs.sh`    | Xia2 DIALS SLURM job template           |
+| `xia2_3dii_jobs.sh`     | Xia2 3dii SLURM job template            |
+
+All generated scripts are marked executable.
+
+### 10.2 Validation Before Generation
+
+| Check                      | Error raised if…                          |
+|----------------------------|-------------------------------------------|
+| Energy list                | No valid energies defined                 |
+| Wedge list                 | No valid wedges defined                   |
+| Data path                  | Empty                                     |
+| Processing path            | Empty                                     |
+
+---
+
+## 11. Job Submission
+
+1. Scripts are generated (as above).
+2. For REST API mode: SSH to `wilson` (interactive password prompt allowed) to retrieve a short-lived SLURM JWT token via `scontrol token`.
+3. For each energy × wedge combination, a minimal wrapper script is POSTed to the DLS SLURM REST endpoint (`https://slurm-rest.diamond.ac.uk:8443/slurm/v0.0.40/job/submit`).
+4. Progress is reported in the status bar: `submitted / total`.
+5. Each submission result is logged.
+
+If `requests` is not available, `urllib` is used as a fallback.
+
+---
+
+## 12. Analysis Tab
+
+### 12.1 Input
+
+- **Processing path**: directory containing `{energy}eV` subdirectories (as written by the processing scripts).
+- **Pipeline**: xia2-dials or xia2-3dii.
+
+The processing path is pre-populated from the shared `settings.ini`.
+
+### 12.2 xia2 Output Parsing
+
+For each `{energy}eV/{images}img/{pipeline}/xia2.txt` file found:
+
+- The statistics table is located and parsed.
+- Values are extracted for overall, low-resolution shell, and high-resolution shell.
+- Fields extracted: high-resolution limit, completeness, multiplicity, I/σ(I), R-merge, R-pim, CC½, anomalous completeness, anomalous multiplicity, anomalous slope, Wilson B-factor.
+- Unit cell parameters (a, b, c, α, β, γ) are parsed from the header (standard-uncertainty notation stripped before parsing).
+
+A run with no statistics table (failed xia2) is recorded as absent and shown as a red cross (✗) in the report.
+
+### 12.3 Report Generation
+
+Output is written to `{processing_path}/results/{pipeline}/` (default) or a user-chosen directory.
+
+If the default output directory already exists, a dialog offers three options:
+
+| Option              | Behaviour                                                  |
+|---------------------|------------------------------------------------------------|
+| Show existing results | Opens `index.html` in the default browser; no re-run    |
+| Re-run and overwrite | Confirms, then re-runs into the same directory           |
+| Re-run in new directory | Prompts for a subdirectory name under `results/`      |
+
+**Generated artefacts**: one PNG per metric (11 total), plus `index.html`.
+
+The HTML report contains:
+- A colour-coded status table (green ✓ / red ✗ per energy/wedge combination)
+- Navigation links to each plot
+- Embedded plots as `<img>` tags
+
+All plots show wedge size on the x-axis. Multi-shell metrics (overall / low / high) are shown as three-panel figures.
+
+Report generation runs in a `QThread` to keep the GUI responsive. Progress messages are emitted as signals and appended to the log panel.
+
+---
+
+## 13. Settings Persistence
+
+- Settings are auto-saved 1 second after any field change (debounced `QTimer`).
+- On save: the INI file is updated and, if a crystal is loaded, `update_crystal()` is called to persist the full form state to the DB.
+- On startup: settings are loaded from INI; the last-loaded crystal ID is restored; the header labels are populated; the energy auto-scan is triggered.
+- On crystal load: DB settings override INI for all form fields.
+- On application close: a confirmation dialog offers Save + Quit, Quit without saving, or Cancel.
+
+---
+
+## 14. Platform and Deployment
+
+- Designed for Diamond Linux workstations (RHEL-based).
+- Supports remote NX and X11 forwarding (`ssh -Y`).
+- `QT_QPA_PLATFORM=xcb` is forced to avoid Wayland/OpenGL initialisation issues.
+- No installer required; run via `uv run spread-gui` from the repository root.
+- Python 3.10+ required (tested on 3.10 and 3.11).
+
+---
+
+## 15. Limitations
+
+- Single filename pattern supported for raw data (`<energy>_E<counter>_1_#####.cbf`).
+- Space group and unit cell must be set via Manage Projects before script generation.
+- No batch submission across multiple crystals in a single operation.
+
+---
+
+## 16. Change History
+
+| Date       | Change                                                                                   |
+|------------|------------------------------------------------------------------------------------------|
+| April 2026 | Full rewrite: project/crystal DB, Manage Projects dialog, SgCellDialog, Analysis tab, header bar, REST API submission, removal of path fields from Processing tab |
+| March 2026 | Initial specification aligned with DLS software documentation conventions                |
