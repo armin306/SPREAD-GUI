@@ -103,6 +103,16 @@ class MainWindow(QMainWindow):
         # ---- Signals ----
         self.proc_tab.crystal_context_changed.connect(self._on_crystal_context_changed)
 
+        # Restore header from the crystal that was active in the previous session.
+        cid = self.proc_tab.current_crystal_id
+        if cid is not None:
+            project, crystal = self._db.get_crystal_info(cid)
+            if project:
+                self._on_crystal_context_changed(project, crystal)
+            else:
+                # Crystal was deleted from the DB since last run — clear the stale id.
+                self.proc_tab._current_crystal_id = None
+
     # ---- Header updates ----
 
     def _on_crystal_context_changed(self, project: str, crystal: str) -> None:

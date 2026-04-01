@@ -419,6 +419,7 @@ class ProcessingTab(QWidget):
             "visit":         self._visit,
             "project":       self._project,
             "crystal":       self._crystal,
+            "crystal_id":    str(self._current_crystal_id) if self._current_crystal_id is not None else "",
             "data_path":     self.data_path_edit.text(),
             "proc_path":     self.proc_path_edit.text(),
             "pdb_mode":      "code" if self.rb_pdb_code.isChecked() else "file",
@@ -444,6 +445,11 @@ class ProcessingTab(QWidget):
         if "visit"   in s: self._visit   = s["visit"]
         if "project" in s: self._project = s["project"]
         if "crystal" in s: self._crystal = s["crystal"]
+        if s.get("crystal_id", ""):
+            try:
+                self._current_crystal_id = int(s["crystal_id"])
+            except ValueError:
+                self._current_crystal_id = None
 
         for key, widget in (
             ("data_path",    self.data_path_edit),
