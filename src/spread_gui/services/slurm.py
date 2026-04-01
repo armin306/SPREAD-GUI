@@ -34,13 +34,23 @@ def run_sbatch(cmd: List[str], cwd: str, dry_run: bool) -> Tuple[int, str, str]:
     return p.returncode, out, err
 
 
-def check_ssh_key_auth(gateway: str = _SLURM_GATEWAY) -> bool:
-    """Return True if passwordless SSH to the gateway node works."""
+def check_ssh_key_auth(gateway: str = _SLURM_GATEWAY) -> tuple[bool, str]:
+    """Return (success, message) for passwordless SSH to the gateway node."""
     result = subprocess.run(
-        ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", gateway, "exit"],
+        [
+            "ssh",
+            "-o", "BatchMode=yes",
+            "-o", "ConnectTimeout=5",
+            "-o", "StrictHostKeyChecking=accept-new",
+            gateway, "exit",
+        ],
         capture_output=True,
+        text=True,
     )
-    return result.returncode == 0
+    if result.returncode == 0:
+        return True, ""
+    msg = (result.stderr.strip() or result.stdout.strip() or "unknown error")
+    return False, msg
 
 
 def setup_ssh_key(password: str, gateway: str = _SLURM_GATEWAY) -> None:
@@ -61,14 +71,17 @@ def setup_ssh_key(password: str, gateway: str = _SLURM_GATEWAY) -> None:
         fh.write(script)
 
     try:
-        pass  # permissions already set correctly above
         env = os.environ.copy()
         env["SSH_ASKPASS"] = askpass_path
         env["SSH_ASKPASS_REQUIRE"] = "force"
         env.setdefault("DISPLAY", ":0")
 
         result = subprocess.run(
-            ["ssh-copy-id", gateway],
+            [
+                "ssh-copy-id",
+                "-o", "StrictHostKeyChecking=accept-new",
+                gateway,
+            ],
             capture_output=True,
             text=True,
             env=env,
@@ -96,6 +109,7 @@ def get_slurm_jwt(lifespan: int = 300) -> str:
             "ssh",
             "-o", "BatchMode=yes",
             "-o", "ConnectTimeout=10",
+            "-o", "StrictHostKeyChecking=accept-new",
             _SLURM_GATEWAY,
             f"scontrol token lifespan={lifespan}",
         ],

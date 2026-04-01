@@ -149,6 +149,7 @@ class ManageProjectsDialog(QDialog):
         self._current_crystal_id = current_crystal_id
         self._current_form_state = current_form_state   # for pre-filling New Crystal
         self.selected_crystal_id: Optional[int] = None  # set on Load
+        self._needs_reload: bool = False  # set when SG/cell updated for active crystal
 
         self._build_ui()
         self._refresh_projects()
@@ -186,10 +187,13 @@ class ManageProjectsDialog(QDialog):
         cb = QHBoxLayout()
         self.btn_new_crystal = QPushButton("+ New")
         self.btn_del_crystal = QPushButton("\u2715 Delete")
+        self.btn_sg_cell     = QPushButton("Set SG \u0026 Cell\u2026")
         self.btn_new_crystal.setEnabled(False)
         self.btn_del_crystal.setEnabled(False)
+        self.btn_sg_cell.setEnabled(False)
         cb.addWidget(self.btn_new_crystal)
         cb.addWidget(self.btn_del_crystal)
+        cb.addWidget(self.btn_sg_cell)
         cb.addStretch(1)
         cv.addLayout(cb)
         panes.addWidget(self.cryst_box, 2)
@@ -216,6 +220,7 @@ class ManageProjectsDialog(QDialog):
         self.btn_del_project.clicked.connect(self._delete_project)
         self.btn_new_crystal.clicked.connect(self._new_crystal)
         self.btn_del_crystal.clicked.connect(self._delete_crystal)
+        self.btn_sg_cell.clicked.connect(self._set_sg_cell)
         self.btn_load.clicked.connect(self._load_crystal)
         btn_close.clicked.connect(self.reject)
 
@@ -307,6 +312,7 @@ class ManageProjectsDialog(QDialog):
         p = self._selected_project()
         has_c = c is not None
         self.btn_del_crystal.setEnabled(has_c)
+        self.btn_sg_cell.setEnabled(has_c)
         self.btn_load.setEnabled(has_c)
         if has_c and p:
             self.selection_label.setText(f"Selected:  {p.name} / {c.name}")
@@ -382,6 +388,51 @@ class ManageProjectsDialog(QDialog):
         p = self._selected_project()
         if p:
             self._refresh_crystals(p.id)
+
+    def _set_sg_cell(self) -> None:
+        from spread_gui.ui.sg_cell_dialog import SgCellDialog
+        from spread_gui.core.model import Cell
+
+        c = self._selected_crystal()
+        if c is None:
+            return
+
+        # Read existing SG/cell from stored settings so the dialog can pre-fill.
+        settings = self._db.get_crystal_settings(c.id)
+        current_sg   = settings.get("space_group", "")
+        current_cell = None
+        try:
+            current_cell = Cell(
+                a=float(settings.get("cell_a", 0)),
+                b=float(settings.get("cell_b", 0)),
+                c=float(settings.get("cell_c", 0)),
+                alpha=float(settings.get("cell_alpha", 0)),
+                beta=float(settings.get("cell_beta", 0)),
+                gamma=float(settings.get("cell_gamma", 0)),
+            )
+        except (TypeError, ValueError):
+            current_cell = None
+
+        dlg = SgCellDialog(current_sg, current_cell, self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        patch: dict = {}
+        if dlg.space_group is not None:
+            patch["space_group"] = dlg.space_group
+        if dlg.cell is not None:
+            patch["cell_a"]     = str(dlg.cell.a)
+            patch["cell_b"]     = str(dlg.cell.b)
+            patch["cell_c"]     = str(dlg.cell.c)
+            patch["cell_alpha"] = str(dlg.cell.alpha)
+            patch["cell_beta"]  = str(dlg.cell.beta)
+            patch["cell_gamma"] = str(dlg.cell.gamma)
+
+        if patch:
+            self._db.patch_crystal_settings(c.id, patch)
+            # If this crystal is currently loaded, tell the caller to reload it.
+            if c.id == self._current_crystal_id:
+                self._needs_reload = True
 
     def _load_crystal(self) -> None:
         c = self._selected_crystal()

@@ -6,6 +6,7 @@ from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QCloseEvent, QFont
 from PyQt6.QtWidgets import (
     QFrame,
+    QGridLayout,
     QHBoxLayout,
     QLabel,
     QMainWindow,
@@ -15,6 +16,7 @@ from PyQt6.QtWidgets import (
     QScrollArea,
     QStatusBar,
     QTabWidget,
+    QVBoxLayout,
     QWidget,
 )
 
@@ -36,42 +38,110 @@ class MainWindow(QMainWindow):
 
         # ---- Central widget ----
         central = QWidget()
-        from PyQt6.QtWidgets import QVBoxLayout
         root = QVBoxLayout(central)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
 
-        # ---- Project/Crystal header bar ----
+        # ---- Header bar ----
         header = QFrame()
         header.setFrameShape(QFrame.Shape.StyledPanel)
         header.setStyleSheet("QFrame { background:#e8eef8; border-bottom:1px solid #b0bcd0; }")
-        hl = QHBoxLayout(header)
-        hl.setContentsMargins(10, 4, 10, 4)
+        hv = QVBoxLayout(header)
+        hv.setContentsMargins(10, 4, 10, 4)
+        hv.setSpacing(2)
 
-        lbl_font = QFont()
-        lbl_font.setBold(True)
+        bold_font = QFont()
+        bold_font.setBold(True)
 
-        hl.addWidget(QLabel("Project:"))
+        detail_font = QFont()
+        detail_font.setPointSize(max(7, bold_font.pointSize() - 1))
+
+        key_style  = "color:#555;"
+        val_style  = "color:#111;"
+        dash_style = "color:#999; margin:0 4px;"
+
+        def _sep() -> QLabel:
+            s = QLabel("|")
+            s.setStyleSheet(dash_style)
+            return s
+
+        def _key(text: str) -> QLabel:
+            lbl = QLabel(text)
+            lbl.setStyleSheet(key_style)
+            lbl.setFont(detail_font)
+            return lbl
+
+        def _val(min_width: int = 0) -> QLabel:
+            lbl = QLabel("\u2014")
+            lbl.setStyleSheet(val_style)
+            lbl.setFont(detail_font)
+            if min_width:
+                lbl.setMinimumWidth(min_width)
+            return lbl
+
+        # -- Row 1: Project / Crystal / Manage button --
+        row1 = QHBoxLayout()
+        row1.setSpacing(4)
+
+        row1.addWidget(QLabel("Project:"))
         self._lbl_project = QLabel("\u2014")
-        self._lbl_project.setFont(lbl_font)
+        self._lbl_project.setFont(bold_font)
         self._lbl_project.setMinimumWidth(120)
-        hl.addWidget(self._lbl_project)
+        row1.addWidget(self._lbl_project)
 
-        sep = QLabel("|")
-        sep.setStyleSheet("color:#999; margin:0 4px;")
-        hl.addWidget(sep)
+        row1.addWidget(_sep())
 
-        hl.addWidget(QLabel("Crystal:"))
+        row1.addWidget(QLabel("Crystal:"))
         self._lbl_crystal = QLabel("\u2014")
-        self._lbl_crystal.setFont(lbl_font)
+        self._lbl_crystal.setFont(bold_font)
         self._lbl_crystal.setMinimumWidth(120)
-        hl.addWidget(self._lbl_crystal)
+        row1.addWidget(self._lbl_crystal)
 
-        hl.addStretch(1)
+        row1.addStretch(1)
 
         self._btn_manage = QPushButton("Manage Projects\u2026")
         self._btn_manage.clicked.connect(self._open_projects_dialog)
-        hl.addWidget(self._btn_manage)
+        row1.addWidget(self._btn_manage)
+
+        hv.addLayout(row1)
+
+        # -- Row 2: Data path / Processing path --
+        row2 = QHBoxLayout()
+        row2.setSpacing(4)
+
+        row2.addWidget(_key("Data path:"))
+        self._lbl_data_path = _val()
+        self._lbl_data_path.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse)
+        row2.addWidget(self._lbl_data_path, 2)
+
+        row2.addWidget(_sep())
+
+        row2.addWidget(_key("Proc path:"))
+        self._lbl_proc_path = _val()
+        self._lbl_proc_path.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse)
+        row2.addWidget(self._lbl_proc_path, 2)
+
+        hv.addLayout(row2)
+
+        # -- Row 3: Space group / Unit cell --
+        row3 = QHBoxLayout()
+        row3.setSpacing(4)
+
+        row3.addWidget(_key("Space group:"))
+        self._lbl_sg = _val(80)
+        row3.addWidget(self._lbl_sg)
+
+        row3.addWidget(_sep())
+
+        row3.addWidget(_key("Unit cell:"))
+        self._lbl_cell = _val()
+        row3.addWidget(self._lbl_cell, 1)
+
+        row3.addStretch(1)
+
+        hv.addLayout(row3)
 
         root.addWidget(header)
 
@@ -102,6 +172,7 @@ class MainWindow(QMainWindow):
 
         # ---- Signals ----
         self.proc_tab.crystal_context_changed.connect(self._on_crystal_context_changed)
+        self.proc_tab.processing_info_changed.connect(self._on_processing_info_changed)
 
         # Restore header from the crystal that was active in the previous session.
         cid = self.proc_tab.current_crystal_id
@@ -110,14 +181,24 @@ class MainWindow(QMainWindow):
             if project:
                 self._on_crystal_context_changed(project, crystal)
             else:
-                # Crystal was deleted from the DB since last run — clear the stale id.
                 self.proc_tab._current_crystal_id = None
+
+        # Populate the details rows with whatever was loaded from settings.
+        self.proc_tab._emit_processing_info()
 
     # ---- Header updates ----
 
     def _on_crystal_context_changed(self, project: str, crystal: str) -> None:
         self._lbl_project.setText(project if project else "\u2014")
         self._lbl_crystal.setText(crystal if crystal else "\u2014")
+
+    def _on_processing_info_changed(
+        self, data_path: str, proc_path: str, space_group: str, cell_str: str
+    ) -> None:
+        self._lbl_data_path.setText(data_path if data_path else "\u2014")
+        self._lbl_proc_path.setText(proc_path if proc_path else "\u2014")
+        self._lbl_sg.setText(space_group if space_group else "\u2014")
+        self._lbl_cell.setText(cell_str if cell_str else "\u2014")
 
     # ---- Manage Projects dialog ----
 
@@ -128,11 +209,15 @@ class MainWindow(QMainWindow):
             self.proc_tab._collect_form_state(),
             self,
         )
-        if dlg.exec() and dlg.selected_crystal_id is not None:
+        result = dlg.exec()
+        if result and dlg.selected_crystal_id is not None:
             # Dialog already asked for confirmation — save current state first,
             # then load the selected crystal.
             self.proc_tab.save_settings()
             self.proc_tab.load_crystal(dlg.selected_crystal_id)
+        elif dlg._needs_reload and self.proc_tab.current_crystal_id is not None:
+            # SG/cell was updated for the currently loaded crystal — reload it.
+            self.proc_tab.load_crystal(self.proc_tab.current_crystal_id)
 
     # ---- Status bar helper ----
 

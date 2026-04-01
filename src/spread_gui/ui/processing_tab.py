@@ -3,7 +3,6 @@ from __future__ import annotations
 import configparser
 import datetime
 import os
-import re
 import shlex
 from pathlib import Path
 from typing import List, Optional, Tuple
@@ -21,8 +20,6 @@ from PyQt6.QtWidgets import (
     QFileDialog,
     QGroupBox,
     QRadioButton,
-    QComboBox,
-    QDoubleSpinBox,
     QSpinBox,
     QTextEdit,
     QMessageBox,
@@ -32,13 +29,11 @@ from PyQt6.QtWidgets import (
 
 from spread_gui.core.model import Cell
 from spread_gui.core.paths import VISIT_RE, detect_visit_from_path, infer_visit_root
-from spread_gui.core.cryst import normalize_sg_name, parse_pdb_cryst1
+from spread_gui.core.cryst import normalize_sg_name
 from spread_gui.core.energies import compute_energy_list, detect_energies_in_dir
 from spread_gui.core.wedges import compute_wedges
-from spread_gui.core.spacegroups import all_spacegroups_230, cell_is_compatible_with_sg
 
 from spread_gui.services.database import ProjectDB
-from spread_gui.services.rcsb import fetch_pdb_text
 from spread_gui.services.slurm import (
     chmod_x,
     run_sbatch,
@@ -54,6 +49,8 @@ _CONFIG_PATH = Path.home() / ".config" / "spread_gui" / "settings.ini"
 class ProcessingTab(QWidget):
     # Emitted when a crystal is loaded from the database (project_name, crystal_name).
     crystal_context_changed = pyqtSignal(str, str)
+    # Emitted after any save: (data_path, proc_path, space_group, cell_str).
+    processing_info_changed = pyqtSignal(str, str, str, str)
 
     def __init__(self, db: ProjectDB, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -107,74 +104,13 @@ class ProcessingTab(QWidget):
         title_row.addWidget(self.btn_new_project)
         root.addLayout(title_row)
 
-        # Visit, project, and crystal are managed via the Manage Projects
-        # dialog and the main-window header; stored as plain attributes.
-        self._visit:   str = ""
-        self._project: str = ""
-        self._crystal: str = ""
-
-        # PDB input
-        pdb_box = QGroupBox("PDB input")
-        v = QVBoxLayout(pdb_box)
-
-        rb_row = QHBoxLayout()
-        self.rb_pdb_file = QRadioButton("Upload local PDB")
-        self.rb_pdb_code = QRadioButton("Enter PDB code and fetch")
-        self.rb_pdb_file.setChecked(True)
-        rb_row.addWidget(self.rb_pdb_file)
-        rb_row.addWidget(self.rb_pdb_code)
-        rb_row.addStretch(1)
-        v.addLayout(rb_row)
-
-        file_row = QHBoxLayout()
-        self.pdb_path_edit = QLineEdit()
-        self.pdb_path_edit.setPlaceholderText("Select a .pdb file")
-        self.btn_browse_pdb = QPushButton("Browse…")
-        file_row.addWidget(self.pdb_path_edit, 1)
-        file_row.addWidget(self.btn_browse_pdb)
-        v.addLayout(file_row)
-
-        code_row = QHBoxLayout()
-        self.pdb_code_edit = QLineEdit()
-        self.pdb_code_edit.setPlaceholderText("e.g. 1ABC")
-        self.btn_fetch_pdb = QPushButton("Fetch")
-        self.pdb_fetch_status = QLabel("")
-        self.pdb_fetch_status.setStyleSheet("color:#666;")
-        code_row.addWidget(self.pdb_code_edit)
-        code_row.addWidget(self.btn_fetch_pdb)
-        code_row.addWidget(self.pdb_fetch_status)
-        code_row.addStretch(1)
-        v.addLayout(code_row)
-        root.addWidget(pdb_box)
-
-        # SG + cell
-        sg_box = QGroupBox("Space group and unit cell (editable)")
-        sg = QGridLayout(sg_box)
-
-        sg.addWidget(QLabel("Space group:"), 0, 0)
-        self.sg_combo = QComboBox()
-        self.sg_combo.addItems(all_spacegroups_230())
-        sg.addWidget(self.sg_combo, 0, 1, 1, 4)
-
-        self.sg_source = QLabel("")
-        self.sg_source.setStyleSheet("color:#666;")
-        sg.addWidget(self.sg_source, 0, 5)
-
-        labels = ["a", "b", "c", "α", "β", "γ"]
-        self.cell_spins: List[QDoubleSpinBox] = []
-        for i, lab in enumerate(labels):
-            sg.addWidget(QLabel(f"{lab}:"), 1 + i // 3, (i % 3) * 2)
-            sp = QDoubleSpinBox()
-            sp.setDecimals(4 if i < 3 else 3)
-            sp.setRange(0.0, 10000.0 if i < 3 else 180.0)
-            sp.setSingleStep(0.1)
-            self.cell_spins.append(sp)
-            sg.addWidget(sp, 1 + i // 3, (i % 3) * 2 + 1)
-
-        self.compat_label = QLabel("")
-        self.compat_label.setStyleSheet("color:#666;")
-        sg.addWidget(self.compat_label, 3, 0, 1, 6)
-        root.addWidget(sg_box)
+        # Visit, project, crystal, space group and unit cell are managed via
+        # the Manage Projects dialog; stored as plain attributes.
+        self._visit:        str            = ""
+        self._project:      str            = ""
+        self._crystal:      str            = ""
+        self._space_group:  str            = ""
+        self._cell:         Optional[Cell] = None
 
         # Paths
         path_box = QGroupBox("Paths")
@@ -327,26 +263,9 @@ class ProcessingTab(QWidget):
         self.log.setPlaceholderText("Log…")
         root.addWidget(self.log, 1)
 
-        self._update_pdb_mode()
         self._update_energy_mode()
 
     def _wire_signals(self) -> None:
-        self.rb_pdb_file.toggled.connect(self._update_pdb_mode)
-        self.rb_pdb_code.toggled.connect(self._update_pdb_mode)
-        self.rb_pdb_file.toggled.connect(self._schedule_autosave)
-        self.rb_pdb_code.toggled.connect(self._schedule_autosave)
-        self.btn_browse_pdb.clicked.connect(self._browse_pdb)
-        self.btn_fetch_pdb.clicked.connect(self._fetch_pdb)
-        self.pdb_path_edit.editingFinished.connect(self._load_pdb_if_possible)
-        self.pdb_path_edit.textChanged.connect(self._schedule_autosave)
-        self.pdb_code_edit.textChanged.connect(self._schedule_autosave)
-
-        self.sg_combo.currentTextChanged.connect(self._validate_cell_sg)
-        self.sg_combo.currentTextChanged.connect(self._schedule_autosave)
-        for sp in self.cell_spins:
-            sp.valueChanged.connect(self._validate_cell_sg)
-            sp.valueChanged.connect(self._schedule_autosave)
-
         self.btn_browse_data.clicked.connect(lambda: self._browse_dir(self.data_path_edit))
         self.btn_browse_proc.clicked.connect(lambda: self._browse_dir(self.proc_path_edit))
         self.data_path_edit.textChanged.connect(self._schedule_autosave)
@@ -414,7 +333,7 @@ class ProcessingTab(QWidget):
 
     def _collect_form_state(self) -> dict:
         """Return all form fields as a flat string dict (matches settings.ini keys)."""
-        cell_keys = ["cell_a", "cell_b", "cell_c", "cell_alpha", "cell_beta", "cell_gamma"]
+        cell = self._cell
         return {
             "visit":         self._visit,
             "project":       self._project,
@@ -422,11 +341,13 @@ class ProcessingTab(QWidget):
             "crystal_id":    str(self._current_crystal_id) if self._current_crystal_id is not None else "",
             "data_path":     self.data_path_edit.text(),
             "proc_path":     self.proc_path_edit.text(),
-            "pdb_mode":      "code" if self.rb_pdb_code.isChecked() else "file",
-            "pdb_path":      self.pdb_path_edit.text(),
-            "pdb_code":      self.pdb_code_edit.text(),
-            "space_group":   self.sg_combo.currentText(),
-            **{cell_keys[i]: str(self.cell_spins[i].value()) for i in range(6)},
+            "space_group":   self._space_group,
+            "cell_a":        str(cell.a)     if cell else "0",
+            "cell_b":        str(cell.b)     if cell else "0",
+            "cell_c":        str(cell.c)     if cell else "0",
+            "cell_alpha":    str(cell.alpha) if cell else "0",
+            "cell_beta":     str(cell.beta)  if cell else "0",
+            "cell_gamma":    str(cell.gamma) if cell else "0",
             "pipeline":      self._pipeline_key(),
             "submit_method": "rest" if self.rb_submit_rest.isChecked() else "sbatch",
             "dry_run":       str(self.chk_dry_run.isChecked()),
@@ -452,34 +373,25 @@ class ProcessingTab(QWidget):
                 self._current_crystal_id = None
 
         for key, widget in (
-            ("data_path",    self.data_path_edit),
-            ("proc_path",    self.proc_path_edit),
-            ("energy_list",  self.energy_list_edit),
-            ("pdb_path",     self.pdb_path_edit),
-            ("pdb_code",     self.pdb_code_edit),
+            ("data_path",   self.data_path_edit),
+            ("proc_path",   self.proc_path_edit),
+            ("energy_list", self.energy_list_edit),
         ):
             if key in s:
                 widget.setText(s[key])
 
-        pdb_mode = s.get("pdb_mode", "")
-        if pdb_mode == "code":
-            self.rb_pdb_code.setChecked(True)
-        elif pdb_mode == "file":
-            self.rb_pdb_file.setChecked(True)
-
-        sg = s.get("space_group", "")
-        if sg:
-            idx = self.sg_combo.findText(sg)
-            if idx >= 0:
-                self.sg_combo.setCurrentIndex(idx)
-
+        self._space_group = s.get("space_group", "")
         cell_keys = ["cell_a", "cell_b", "cell_c", "cell_alpha", "cell_beta", "cell_gamma"]
-        for i, key in enumerate(cell_keys):
-            if key in s:
-                try:
-                    self.cell_spins[i].setValue(float(s[key]))
-                except ValueError:
-                    pass
+        cell_vals = []
+        for key in cell_keys:
+            try:
+                cell_vals.append(float(s.get(key, 0)))
+            except (TypeError, ValueError):
+                cell_vals.append(0.0)
+        if any(v != 0.0 for v in cell_vals):
+            self._cell = Cell(*cell_vals)
+        else:
+            self._cell = None
 
         pipeline = s.get("pipeline", "")
         if pipeline == "xia2_dials":
@@ -528,6 +440,23 @@ class ProcessingTab(QWidget):
         if "auto_energies" in s:
             self.chk_auto_energies.setChecked(s["auto_energies"].lower() == "true")
 
+    def _cell_str(self) -> str:
+        c = self._cell
+        if c is None:
+            return "\u2014"
+        return (
+            f"a={c.a:.4g}  b={c.b:.4g}  c={c.c:.4g}"
+            f"    \u03b1={c.alpha:.4g}  \u03b2={c.beta:.4g}  \u03b3={c.gamma:.4g}"
+        )
+
+    def _emit_processing_info(self) -> None:
+        self.processing_info_changed.emit(
+            self.data_path_edit.text(),
+            self.proc_path_edit.text(),
+            self._space_group or "\u2014",
+            self._cell_str(),
+        )
+
     def save_settings(self) -> None:
         state = self._collect_form_state()
         cfg = configparser.ConfigParser()
@@ -544,6 +473,7 @@ class ProcessingTab(QWidget):
             except Exception as e:
                 self._log(f"Warning: could not save crystal to database: {e}")
         self._dirty = False
+        self._emit_processing_info()
 
     # ---------------- Crystal context ----------------
 
@@ -564,6 +494,7 @@ class ProcessingTab(QWidget):
         self._schedule_energy_scan()
         project_name, crystal_name = self._db.get_crystal_info(crystal_id)
         self.crystal_context_changed.emit(project_name, crystal_name)
+        self._emit_processing_info()
 
     # ---------------- UI helpers ----------------
     def _schedule_autosave(self) -> None:
@@ -580,13 +511,6 @@ class ProcessingTab(QWidget):
 
     def _info(self, title: str, msg: str) -> None:
         QMessageBox.information(self, title, msg)
-
-    def _update_pdb_mode(self) -> None:
-        file_mode = self.rb_pdb_file.isChecked()
-        self.pdb_path_edit.setEnabled(file_mode)
-        self.btn_browse_pdb.setEnabled(file_mode)
-        self.pdb_code_edit.setEnabled(not file_mode)
-        self.btn_fetch_pdb.setEnabled(not file_mode)
 
     def _update_energy_mode(self) -> None:
         range_mode = self.rb_energy_range.isChecked()
@@ -690,40 +614,8 @@ class ProcessingTab(QWidget):
         self._refresh_previews_and_validation()
 
     # ---------------- Validation & previews ----------------
-    def _validate_visit(self) -> None:
-        pass  # visit is no longer an editable widget; validated at script-generation time
-
-    def _current_cell(self) -> Cell:
-        return Cell(
-            a=float(self.cell_spins[0].value()),
-            b=float(self.cell_spins[1].value()),
-            c=float(self.cell_spins[2].value()),
-            alpha=float(self.cell_spins[3].value()),
-            beta=float(self.cell_spins[4].value()),
-            gamma=float(self.cell_spins[5].value()),
-        )
-
-    def _validate_cell_sg(self) -> None:
-        cell = self._current_cell()
-        sg_name = normalize_sg_name(self.sg_combo.currentText())
-        ok, msg = cell_is_compatible_with_sg(cell, sg_name)
-
-        if ok:
-            for sp in self.cell_spins:
-                sp.setStyleSheet("")
-            self.sg_combo.setStyleSheet("")
-            self.compat_label.setStyleSheet("color:#2a7;")
-        else:
-            for sp in self.cell_spins:
-                sp.setStyleSheet("border: 2px solid #c00;")
-            self.sg_combo.setStyleSheet("border: 2px solid #c00;")
-            self.compat_label.setStyleSheet("color:#c00;")
-
-        self.compat_label.setText(msg)
 
     def _refresh_previews_and_validation(self) -> None:
-        self._validate_visit()
-        self._validate_cell_sg()
 
         energies = compute_energy_list(
             self.rb_energy_range.isChecked(),
@@ -751,87 +643,6 @@ class ProcessingTab(QWidget):
             )
         else:
             self.wedge_preview.setText("list_of_wedges: (none / invalid)")
-
-    # ---------------- PDB load / fetch ----------------
-    def _browse_pdb(self) -> None:
-        fn, _ = QFileDialog.getOpenFileName(
-            self,
-            "Select PDB file",
-            "",
-            "PDB files (*.pdb *.ent);;All files (*)",
-        )
-        if fn:
-            self.pdb_path_edit.setText(fn)
-            self._load_pdb_if_possible()
-
-    def _load_pdb_if_possible(self) -> None:
-        path = self.pdb_path_edit.text().strip()
-        if not path:
-            return
-        if not os.path.isfile(path):
-            self._warn("PDB", f"File not found:\n{path}")
-            return
-        self._apply_pdb_header(path)
-
-    def _fetch_pdb(self) -> None:
-        code = self.pdb_code_edit.text().strip().upper()
-        if not re.match(r"^[0-9][A-Z0-9]{3}$", code):
-            self._warn("PDB code", "Please enter a valid 4-character PDB code (e.g. 1ABC).")
-            return
-
-        self.pdb_fetch_status.setText(f"Fetching {code}…")
-        self.pdb_fetch_status.repaint()
-
-        try:
-            text = fetch_pdb_text(code, timeout=20)
-        except Exception as e:
-            self.pdb_fetch_status.setText("Fetch failed")
-            self._warn("Fetch failed", f"Could not download PDB:\n{code}\n\n{e}")
-            return
-
-        out_dir = self.proc_path_edit.text().strip() or os.getcwd()
-        os.makedirs(out_dir, exist_ok=True)
-        out_path = os.path.join(out_dir, f"{code}.pdb")
-
-        try:
-            with open(out_path, "wt") as fh:
-                fh.write(text)
-        except Exception as e:
-            self.pdb_fetch_status.setText("Save failed")
-            self._warn("Save failed", f"Could not save PDB to:\n{out_path}\n\n{e}")
-            return
-
-        self.pdb_fetch_status.setText(f"Saved {code}.pdb")
-        self._log(f"Fetched PDB {code} -> {out_path}")
-
-        self.rb_pdb_file.setChecked(True)
-        self.pdb_path_edit.setText(out_path)
-        self._apply_pdb_header(out_path)
-
-    def _apply_pdb_header(self, pdb_path: str) -> None:
-        cell, sg = parse_pdb_cryst1(pdb_path)
-        if cell:
-            self.cell_spins[0].setValue(cell.a)
-            self.cell_spins[1].setValue(cell.b)
-            self.cell_spins[2].setValue(cell.c)
-            self.cell_spins[3].setValue(cell.alpha)
-            self.cell_spins[4].setValue(cell.beta)
-            self.cell_spins[5].setValue(cell.gamma)
-        else:
-            self._warn("PDB", "Could not find CRYST1 record for unit cell in PDB header.")
-
-        if sg:
-            sg_norm = normalize_sg_name(sg)
-            idx = self.sg_combo.findText(sg_norm)
-            if idx >= 0:
-                self.sg_combo.setCurrentIndex(idx)
-                self.sg_source.setText("From PDB")
-            else:
-                self.sg_source.setText(f"From PDB (not matched): {sg_norm}")
-        else:
-            self.sg_source.setText("No SG in PDB header (select manually)")
-
-        self._refresh_previews_and_validation()
 
     # ---------------- Pipeline selection ----------------
     def _pipeline_key(self) -> str:
@@ -1001,21 +812,11 @@ xia2 pipeline=3dii \\
         if reply != QMessageBox.StandardButton.Yes:
             return
 
-        self._visit   = ""
-        self._project = ""
-        self._crystal = ""
-
-        # PDB
-        self.rb_pdb_file.setChecked(True)
-        self.pdb_path_edit.clear()
-        self.pdb_code_edit.clear()
-        self.pdb_fetch_status.setText("")
-
-        # Space group and cell
-        self.sg_combo.setCurrentIndex(0)
-        for sp in self.cell_spins:
-            sp.setValue(0.0)
-        self.sg_source.setText("")
+        self._visit       = ""
+        self._project     = ""
+        self._crystal     = ""
+        self._space_group = ""
+        self._cell        = None
 
         # Paths
         self.data_path_edit.clear()
@@ -1036,19 +837,23 @@ xia2 pipeline=3dii \\
         self._current_crystal_id = None
         self._dirty = False
         self.crystal_context_changed.emit("", "")
+        self._emit_processing_info()
         self.log.clear()
         self._refresh_previews_and_validation()
         self._log("New project — all fields reset to defaults.")
 
     # ---------------- SSH key helpers ----------------
     def _check_ssh_key_status(self) -> None:
-        if check_ssh_key_auth():
+        ok, err = check_ssh_key_auth()
+        if ok:
             self.ssh_key_status.setText("SSH key: OK (passwordless)")
             self.ssh_key_status.setStyleSheet("color:green;")
+            self.ssh_key_status.setToolTip("")
             self.btn_setup_ssh_key.setText("Re-setup SSH key…")
         else:
-            self.ssh_key_status.setText("SSH key: not configured — password required on submit")
+            self.ssh_key_status.setText("SSH key: auth failed — see tooltip")
             self.ssh_key_status.setStyleSheet("color:#b05000;")
+            self.ssh_key_status.setToolTip(err or "SSH returned a non-zero exit code")
             self.btn_setup_ssh_key.setText("Setup SSH key…")
 
     def _setup_ssh_key(self) -> None:
@@ -1077,8 +882,8 @@ xia2 pipeline=3dii \\
 
         data_dir = self.data_path_edit.text().strip()
         proc_dir = self.proc_path_edit.text().strip()
-        cell = self._current_cell()
-        sg = normalize_sg_name(self.sg_combo.currentText())
+        cell = self._cell or Cell(0, 0, 0, 0, 0, 0)
+        sg = normalize_sg_name(self._space_group) if self._space_group else ""
         project = self._project.strip() or "PROJECT"
         crystal = self._crystal.strip() or "CRYSTAL"
 

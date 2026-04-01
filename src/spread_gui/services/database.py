@@ -212,6 +212,12 @@ class ProjectDB:
             return {}
         return json.loads(row["settings"])
 
+    def patch_crystal_settings(self, crystal_id: int, patch: dict) -> None:
+        """Merge *patch* into the existing settings JSON for *crystal_id*."""
+        existing = self.get_crystal_settings(crystal_id)
+        existing.update(patch)
+        self.update_crystal(crystal_id, existing)
+
     def get_crystal_info(self, crystal_id: int) -> tuple[str, str]:
         """Return (project_name, crystal_name) for the given crystal id."""
         with self._connect() as con:
