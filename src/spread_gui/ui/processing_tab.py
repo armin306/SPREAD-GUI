@@ -88,7 +88,8 @@ class ProcessingTab(QWidget):
         self.save_settings()  # write back immediately to upgrade any stale settings file
         self._refresh_previews_and_validation()
         self._schedule_energy_scan()
-        self._check_ssh_key_status()
+        # Defer the SSH check so it doesn't block the window from painting.
+        QTimer.singleShot(0, self._check_ssh_key_status)
 
     # ---------------- UI ----------------
     def _build_ui(self) -> None:

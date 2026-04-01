@@ -23,7 +23,8 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from spread_gui.core.xia2_analysis import collect_results, generate_report
+# xia2_analysis imports matplotlib, which is slow to load.  Defer the import
+# to inside the worker thread so it doesn't block the main window from painting.
 
 _CONFIG_PATH = Path.home() / ".config" / "spread_gui" / "settings.ini"
 
@@ -102,6 +103,7 @@ class _AnalysisWorker(QThread):
 
     def run(self) -> None:
         try:
+            from spread_gui.core.xia2_analysis import collect_results, generate_report
             results = collect_results(Path(self._proc_path), self._pipeline)
             html_path = generate_report(
                 results,
