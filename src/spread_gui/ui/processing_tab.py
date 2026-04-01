@@ -101,33 +101,17 @@ class ProcessingTab(QWidget):
         title.setFont(f)
         title_row.addWidget(title)
         title_row.addStretch(1)
-        self.btn_new_project = QPushButton("New Project")
-        title_row.addWidget(self.btn_new_project)
         root.addLayout(title_row)
 
-        # Visit, project, crystal, space group and unit cell are managed via
-        # the Manage Projects dialog; stored as plain attributes.
+        # All crystal metadata (visit, project, crystal, paths, SG, cell) is
+        # managed via the Manage Projects dialog; stored as plain attributes.
         self._visit:        str            = ""
         self._project:      str            = ""
         self._crystal:      str            = ""
+        self._data_path:    str            = ""
+        self._proc_path:    str            = ""
         self._space_group:  str            = ""
         self._cell:         Optional[Cell] = None
-
-        # Paths
-        path_box = QGroupBox("Paths")
-        pg = QGridLayout(path_box)
-        pg.addWidget(QLabel("Data path:"), 0, 0)
-        self.data_path_edit = QLineEdit()
-        self.btn_browse_data = QPushButton("Browse…")
-        pg.addWidget(self.data_path_edit, 0, 1)
-        pg.addWidget(self.btn_browse_data, 0, 2)
-
-        pg.addWidget(QLabel("Processing path:"), 1, 0)
-        self.proc_path_edit = QLineEdit()
-        self.btn_browse_proc = QPushButton("Browse…")
-        pg.addWidget(self.proc_path_edit, 1, 1)
-        pg.addWidget(self.btn_browse_proc, 1, 2)
-        root.addWidget(path_box)
 
         # Energy definition
         e_box = QGroupBox("Energy definition")
@@ -267,14 +251,6 @@ class ProcessingTab(QWidget):
         self._update_energy_mode()
 
     def _wire_signals(self) -> None:
-        self.btn_browse_data.clicked.connect(lambda: self._browse_dir(self.data_path_edit))
-        self.btn_browse_proc.clicked.connect(lambda: self._browse_dir(self.proc_path_edit))
-        self.data_path_edit.textChanged.connect(self._schedule_autosave)
-        self.proc_path_edit.textChanged.connect(self._schedule_autosave)
-
-        self.data_path_edit.textChanged.connect(self._schedule_energy_scan)
-        self.data_path_edit.editingFinished.connect(self._schedule_energy_scan)
-
         self.rb_energy_range.toggled.connect(self._update_energy_mode)
         self.rb_energy_list.toggled.connect(self._update_energy_mode)
         self.rb_energy_range.toggled.connect(self._schedule_autosave)
@@ -303,7 +279,6 @@ class ProcessingTab(QWidget):
         self.rb_submit_sbatch.toggled.connect(self._schedule_autosave)
         self.chk_dry_run.toggled.connect(self._schedule_autosave)
 
-        self.btn_new_project.clicked.connect(self._new_project)
         self.btn_generate.clicked.connect(self.generate_scripts)
         self.btn_submit.clicked.connect(self.submit_jobs)
         self.btn_save_log.clicked.connect(self._save_log)
@@ -317,8 +292,8 @@ class ProcessingTab(QWidget):
             self._visit = visit
             root = infer_visit_root(cwd, visit)
             if root:
-                self.data_path_edit.setText(root)
-                self.proc_path_edit.setText(os.path.join(root, "processing", "SPREAD"))
+                self._data_path = root
+                self._proc_path = os.path.join(root, "processing", "SPREAD")
 
     # ---------------- Persistent settings ----------------
     def _load_settings(self) -> None:
@@ -340,8 +315,8 @@ class ProcessingTab(QWidget):
             "project":       self._project,
             "crystal":       self._crystal,
             "crystal_id":    str(self._current_crystal_id) if self._current_crystal_id is not None else "",
-            "data_path":     self.data_path_edit.text(),
-            "proc_path":     self.proc_path_edit.text(),
+            "data_path":     self._data_path,
+            "proc_path":     self._proc_path,
             "space_group":   self._space_group,
             "cell_a":        str(cell.a)     if cell else "0",
             "cell_b":        str(cell.b)     if cell else "0",
@@ -373,13 +348,10 @@ class ProcessingTab(QWidget):
             except ValueError:
                 self._current_crystal_id = None
 
-        for key, widget in (
-            ("data_path",   self.data_path_edit),
-            ("proc_path",   self.proc_path_edit),
-            ("energy_list", self.energy_list_edit),
-        ):
-            if key in s:
-                widget.setText(s[key])
+        if "data_path" in s: self._data_path = s["data_path"]
+        if "proc_path" in s: self._proc_path = s["proc_path"]
+        if "energy_list" in s:
+            self.energy_list_edit.setText(s["energy_list"])
 
         self._space_group = s.get("space_group", "")
         cell_keys = ["cell_a", "cell_b", "cell_c", "cell_alpha", "cell_beta", "cell_gamma"]
@@ -452,8 +424,8 @@ class ProcessingTab(QWidget):
 
     def _emit_processing_info(self) -> None:
         self.processing_info_changed.emit(
-            self.data_path_edit.text(),
-            self.proc_path_edit.text(),
+            self._data_path,
+            self._proc_path,
             self._space_group or "\u2014",
             self._cell_str(),
         )
@@ -522,13 +494,8 @@ class ProcessingTab(QWidget):
         self.energy_list_edit.setEnabled((not range_mode) and (not auto))
         self._refresh_previews_and_validation()
 
-    def _browse_dir(self, target: QLineEdit) -> None:
-        d = QFileDialog.getExistingDirectory(self, "Select directory", target.text().strip() or os.getcwd())
-        if d:
-            target.setText(d)
-
     def _save_log(self) -> None:
-        proc_dir = self.proc_path_edit.text().strip() or os.getcwd()
+        proc_dir = self._proc_path or os.getcwd()
         ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         default_name = os.path.join(proc_dir, f"spread_gui_{ts}.log")
         path, _ = QFileDialog.getSaveFileName(
@@ -587,7 +554,7 @@ class ProcessingTab(QWidget):
     def _auto_update_energies_from_data_dir(self) -> None:
         if not self.chk_auto_energies.isChecked():
             return
-        data_dir = self.data_path_edit.text().strip()
+        data_dir = self._data_path
         self._set_watched_directory(data_dir)
 
         energies = detect_energies_in_dir(data_dir)
@@ -655,7 +622,7 @@ class ProcessingTab(QWidget):
 
     # ---------------- Script generation ----------------
     def _script_paths(self) -> Tuple[str, str, str, str]:
-        proc_dir = self.proc_path_edit.text().strip() or os.getcwd()
+        proc_dir = self._proc_path or os.getcwd()
         os.makedirs(proc_dir, exist_ok=True)
         submit_script = os.path.join(proc_dir, "run_spread_submit.sh")
         ap = os.path.join(proc_dir, "autoproc_jobs.sh")
@@ -682,9 +649,9 @@ class ProcessingTab(QWidget):
         if not wedges:
             raise ValueError("No valid wedges defined.")
 
-        if not self.data_path_edit.text().strip():
+        if not self._data_path:
             raise ValueError("Data path is empty.")
-        if not self.proc_path_edit.text().strip():
+        if not self._proc_path:
             raise ValueError("Processing path is empty.")
 
         return energies, wedges
@@ -803,46 +770,6 @@ xia2 pipeline=3dii \\
 """
 
     # ---------------- New project ----------------
-    def _new_project(self) -> None:
-        reply = QMessageBox.question(
-            self,
-            "New Project",
-            "Clear all project fields and reset to defaults?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
-        )
-        if reply != QMessageBox.StandardButton.Yes:
-            return
-
-        self._visit       = ""
-        self._project     = ""
-        self._crystal     = ""
-        self._space_group = ""
-        self._cell        = None
-
-        # Paths
-        self.data_path_edit.clear()
-        self.proc_path_edit.clear()
-
-        # Energy
-        self.rb_energy_range.setChecked(True)
-        self.energy_start.setValue(12600.0)
-        self.energy_end.setValue(12610.0)
-        self.energy_inc.setValue(1.0)
-        self.energy_list_edit.clear()
-        self.chk_auto_energies.setChecked(True)
-
-        # Wedge
-        self.wedge_size.setValue(300)
-        self.total_images.setValue(3600)
-
-        self._current_crystal_id = None
-        self._dirty = False
-        self.crystal_context_changed.emit("", "")
-        self._emit_processing_info()
-        self.log.clear()
-        self._refresh_previews_and_validation()
-        self._log("New project — all fields reset to defaults.")
-
     # ---------------- SSH key helpers ----------------
     def _check_ssh_key_status(self) -> None:
         ok, err = check_ssh_key_auth()
@@ -881,8 +808,8 @@ xia2 pipeline=3dii \\
             self._warn("Invalid inputs", str(e))
             return
 
-        data_dir = self.data_path_edit.text().strip()
-        proc_dir = self.proc_path_edit.text().strip()
+        data_dir = self._data_path
+        proc_dir = self._proc_path
         cell = self._cell or Cell(0, 0, 0, 0, 0, 0)
         sg = normalize_sg_name(self._space_group) if self._space_group else ""
         project = self._project.strip() or "PROJECT"
@@ -936,7 +863,7 @@ xia2 pipeline=3dii \\
             self._warn("Invalid inputs", str(e))
             return
 
-        proc_dir = self.proc_path_edit.text().strip()
+        proc_dir = self._proc_path
         pipeline = self._pipeline_key()
         pipeline_script = {
             "autoproc": "autoproc_jobs.sh",

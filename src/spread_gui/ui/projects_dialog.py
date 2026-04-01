@@ -143,7 +143,7 @@ class ManageProjectsDialog(QDialog):
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Manage Projects")
-        self.setMinimumSize(700, 420)
+        self.setMinimumSize(1000, 450)
 
         self._db                 = db
         self._current_crystal_id = current_crystal_id
