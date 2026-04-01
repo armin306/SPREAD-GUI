@@ -8,7 +8,7 @@ import shlex
 from pathlib import Path
 from typing import List, Optional, Tuple
 
-from PyQt6.QtCore import QTimer, QFileSystemWatcher
+from PyQt6.QtCore import QTimer, QFileSystemWatcher, pyqtSignal
 from PyQt6.QtGui import QFont
 from PyQt6.QtWidgets import (
     QWidget,
@@ -37,6 +37,7 @@ from spread_gui.core.energies import compute_energy_list, detect_energies_in_dir
 from spread_gui.core.wedges import compute_wedges
 from spread_gui.core.spacegroups import all_spacegroups_230, cell_is_compatible_with_sg
 
+from spread_gui.services.database import ProjectDB
 from spread_gui.services.rcsb import fetch_pdb_text
 from spread_gui.services.slurm import (
     chmod_x,
@@ -51,8 +52,15 @@ _CONFIG_PATH = Path.home() / ".config" / "spread_gui" / "settings.ini"
 
 
 class ProcessingTab(QWidget):
-    def __init__(self, parent: QWidget | None = None) -> None:
+    # Emitted when a crystal is loaded from the database (project_name, crystal_name).
+    crystal_context_changed = pyqtSignal(str, str)
+
+    def __init__(self, db: ProjectDB, parent: QWidget | None = None) -> None:
         super().__init__(parent)
+
+        self._db: ProjectDB = db
+        self._current_crystal_id: Optional[int] = None
+        self._dirty: bool = False
 
         # Auto-energy mechanisms
         self._energy_scan_timer = QTimer(self)
@@ -422,17 +430,48 @@ class ProcessingTab(QWidget):
         cfg.read(_CONFIG_PATH)
         if "spread_gui" not in cfg:
             return
-        s = cfg["spread_gui"]
+        self._apply_form_state(dict(cfg["spread_gui"]))
 
+    # ---------------- Form state dict (shared by INI and DB) ----------------
+
+    def _collect_form_state(self) -> dict:
+        """Return all form fields as a flat string dict (matches settings.ini keys)."""
+        cell_keys = ["cell_a", "cell_b", "cell_c", "cell_alpha", "cell_beta", "cell_gamma"]
+        return {
+            "visit":         self.visit_edit.text(),
+            "project":       self.project_edit.text(),
+            "crystal":       self.crystal_edit.text(),
+            "data_path":     self.data_path_edit.text(),
+            "proc_path":     self.proc_path_edit.text(),
+            "pdb_mode":      "code" if self.rb_pdb_code.isChecked() else "file",
+            "pdb_path":      self.pdb_path_edit.text(),
+            "pdb_code":      self.pdb_code_edit.text(),
+            "space_group":   self.sg_combo.currentText(),
+            **{cell_keys[i]: str(self.cell_spins[i].value()) for i in range(6)},
+            "pipeline":      self._pipeline_key(),
+            "submit_method": "rest" if self.rb_submit_rest.isChecked() else "sbatch",
+            "dry_run":       str(self.chk_dry_run.isChecked()),
+            "energy_mode":   "range" if self.rb_energy_range.isChecked() else "list",
+            "energy_start":  str(self.energy_start.value()),
+            "energy_end":    str(self.energy_end.value()),
+            "energy_inc":    str(self.energy_inc.value()),
+            "energy_list":   self.energy_list_edit.text(),
+            "wedge_size":    str(self.wedge_size.value()),
+            "total_images":  str(self.total_images.value()),
+            "auto_energies": str(self.chk_auto_energies.isChecked()),
+        }
+
+    def _apply_form_state(self, s: dict) -> None:
+        """Populate form fields from a flat string dict."""
         for key, widget in (
-            ("visit", self.visit_edit),
-            ("project", self.project_edit),
-            ("crystal", self.crystal_edit),
-            ("data_path", self.data_path_edit),
-            ("proc_path", self.proc_path_edit),
-            ("energy_list", self.energy_list_edit),
-            ("pdb_path", self.pdb_path_edit),
-            ("pdb_code", self.pdb_code_edit),
+            ("visit",        self.visit_edit),
+            ("project",      self.project_edit),
+            ("crystal",      self.crystal_edit),
+            ("data_path",    self.data_path_edit),
+            ("proc_path",    self.proc_path_edit),
+            ("energy_list",  self.energy_list_edit),
+            ("pdb_path",     self.pdb_path_edit),
+            ("pdb_code",     self.pdb_code_edit),
         ):
             if key in s:
                 widget.setText(s[key])
@@ -482,8 +521,8 @@ class ProcessingTab(QWidget):
 
         for key, spin in (
             ("energy_start", self.energy_start),
-            ("energy_end", self.energy_end),
-            ("energy_inc", self.energy_inc),
+            ("energy_end",   self.energy_end),
+            ("energy_inc",   self.energy_inc),
         ):
             if key in s:
                 try:
@@ -492,7 +531,7 @@ class ProcessingTab(QWidget):
                     pass
 
         for key, spin in (
-            ("wedge_size", self.wedge_size),
+            ("wedge_size",   self.wedge_size),
             ("total_images", self.total_images),
         ):
             if key in s:
@@ -505,41 +544,46 @@ class ProcessingTab(QWidget):
             self.chk_auto_energies.setChecked(s["auto_energies"].lower() == "true")
 
     def save_settings(self) -> None:
+        state = self._collect_form_state()
         cfg = configparser.ConfigParser()
-        cell_keys = ["cell_a", "cell_b", "cell_c", "cell_alpha", "cell_beta", "cell_gamma"]
-        cfg["spread_gui"] = {
-            "visit": self.visit_edit.text(),
-            "project": self.project_edit.text(),
-            "crystal": self.crystal_edit.text(),
-            "data_path": self.data_path_edit.text(),
-            "proc_path": self.proc_path_edit.text(),
-            "pdb_mode": "code" if self.rb_pdb_code.isChecked() else "file",
-            "pdb_path": self.pdb_path_edit.text(),
-            "pdb_code": self.pdb_code_edit.text(),
-            "space_group": self.sg_combo.currentText(),
-            **{cell_keys[i]: str(self.cell_spins[i].value()) for i in range(6)},
-            "pipeline": self._pipeline_key(),
-            "submit_method": "rest" if self.rb_submit_rest.isChecked() else "sbatch",
-            "dry_run": str(self.chk_dry_run.isChecked()),
-            "energy_mode": "range" if self.rb_energy_range.isChecked() else "list",
-            "energy_start": str(self.energy_start.value()),
-            "energy_end": str(self.energy_end.value()),
-            "energy_inc": str(self.energy_inc.value()),
-            "energy_list": self.energy_list_edit.text(),
-            "wedge_size": str(self.wedge_size.value()),
-            "total_images": str(self.total_images.value()),
-            "auto_energies": str(self.chk_auto_energies.isChecked()),
-        }
+        cfg["spread_gui"] = state
         _CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
         try:
             with open(_CONFIG_PATH, "wt") as fh:
                 cfg.write(fh)
         except Exception as e:
             self._log(f"Warning: could not save settings to {_CONFIG_PATH}: {e}")
+        if self._current_crystal_id is not None:
+            try:
+                self._db.update_crystal(self._current_crystal_id, state)
+            except Exception as e:
+                self._log(f"Warning: could not save crystal to database: {e}")
+        self._dirty = False
+
+    # ---------------- Crystal context ----------------
+
+    @property
+    def current_crystal_id(self) -> Optional[int]:
+        return self._current_crystal_id
+
+    def load_crystal(self, crystal_id: int) -> None:
+        """Load a crystal from the database into the form."""
+        settings = self._db.get_crystal_settings(crystal_id)
+        self._loading = True
+        self._apply_form_state(settings)
+        self._loading = False
+        self._current_crystal_id = crystal_id
+        self._dirty = False
+        self.save_settings()           # sync INI immediately
+        self._refresh_previews_and_validation()
+        self._schedule_energy_scan()
+        project_name, crystal_name = self._db.get_crystal_info(crystal_id)
+        self.crystal_context_changed.emit(project_name, crystal_name)
 
     # ---------------- UI helpers ----------------
     def _schedule_autosave(self) -> None:
         if not self._loading:
+            self._dirty = True
             self._autosave_timer.start(1000)
 
     def _log(self, msg: str) -> None:
@@ -1010,6 +1054,9 @@ xia2 pipeline=3dii \\
         self.wedge_size.setValue(300)
         self.total_images.setValue(3600)
 
+        self._current_crystal_id = None
+        self._dirty = False
+        self.crystal_context_changed.emit("", "")
         self.log.clear()
         self._refresh_previews_and_validation()
         self._log("New project — all fields reset to defaults.")
