@@ -107,7 +107,6 @@ def get_slurm_jwt(lifespan: int = 300) -> str:
     result = subprocess.run(
         [
             "ssh",
-            "-o", "BatchMode=yes",
             "-o", "ConnectTimeout=10",
             "-o", "StrictHostKeyChecking=accept-new",
             _SLURM_GATEWAY,
@@ -115,7 +114,7 @@ def get_slurm_jwt(lifespan: int = 300) -> str:
         ],
         capture_output=True,
         text=True,
-        timeout=15,
+        timeout=30,
     )
     if result.returncode != 0:
         raise RuntimeError(
