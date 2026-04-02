@@ -7,7 +7,7 @@ import shlex
 from pathlib import Path
 from typing import List, Optional, Tuple
 
-from PyQt6.QtCore import QTimer, QFileSystemWatcher, pyqtSignal
+from PyQt6.QtCore import QThread, QTimer, QFileSystemWatcher, pyqtSignal
 from PyQt6.QtGui import QFont
 from PyQt6.QtWidgets import (
     QWidget,
@@ -47,6 +47,35 @@ from spread_gui.services.slurm import (
 _CONFIG_PATH = Path.home() / ".config" / "spread_gui" / "settings.ini"
 
 
+class _DataScanWorker(QThread):
+    """Scans the data directory for energies and wedge size off the main thread."""
+    energies_found = pyqtSignal(list)          # List[int]
+    wedge_found    = pyqtSignal(int, int)       # wedge_size, total_images
+
+    def __init__(self, data_dir: str, scan_energies: bool, scan_wedges: bool) -> None:
+        super().__init__()
+        self._data_dir     = data_dir
+        self._scan_energies = scan_energies
+        self._scan_wedges   = scan_wedges
+
+    def run(self) -> None:
+        if self._scan_energies:
+            energies = detect_energies_in_dir(self._data_dir)
+            self.energies_found.emit(energies)
+
+        if self._scan_wedges:
+            import glob as _glob
+            wedge = detect_wedge_size_in_dir(self._data_dir)
+            total = 0
+            if wedge > 0:
+                energies_found = detect_energies_in_dir(self._data_dir)
+                if energies_found:
+                    e0 = energies_found[0]
+                    pat = os.path.join(self._data_dir, f"{e0}_E1_1_?????.cbf")
+                    total = len(_glob.glob(pat))
+            self.wedge_found.emit(wedge, total)
+
+
 class ProcessingTab(QWidget):
     # Emitted when a crystal is loaded from the database (project_name, crystal_name).
     crystal_context_changed = pyqtSignal(str, str)
@@ -76,6 +105,7 @@ class ProcessingTab(QWidget):
         self._watched_data_dir: Optional[str] = None
 
         self._last_auto_energies: Optional[List[int]] = None
+        self._scan_worker: Optional[_DataScanWorker] = None
 
         self._build_ui()
         self._wire_signals()
@@ -579,46 +609,61 @@ class ProcessingTab(QWidget):
         data_dir = self._data_path
         self._set_watched_directory(data_dir)
 
-        if self.chk_auto_energies.isChecked():
-            energies = detect_energies_in_dir(data_dir)
-            if not energies:
-                if self._last_auto_energies != []:
-                    self._last_auto_energies = []
-                    self.energy_preview.setText("Energies (auto): no matching files found in Data path.")
-                    self._log(f"Auto-energy scan: no energies found in {data_dir}")
-            else:
-                self.rb_energy_list.setChecked(True)
-                self._update_energy_mode()
-                self.energy_list_edit.setText(", ".join(str(e) for e in energies))
-                self.energy_preview.setText(
-                    f"Energies (auto, n={len(energies)}): "
-                    + ", ".join(str(e) for e in energies[:10])
-                    + (" …" if len(energies) > 10 else "")
-                )
-                if self._last_auto_energies != energies:
-                    self._last_auto_energies = energies
-                    self._log(f"Auto-detected energies from {data_dir}: {', '.join(str(e) for e in energies)}")
+        scan_energies = self.chk_auto_energies.isChecked()
+        scan_wedges   = self.chk_auto_wedges.isChecked()
+        if not scan_energies and not scan_wedges:
+            return
+        if not data_dir or not os.path.isdir(data_dir):
+            return
 
-        if self.chk_auto_wedges.isChecked():
-            wedge = detect_wedge_size_in_dir(data_dir)
-            if wedge > 0:
-                # Count total frames for the primary sweep of the first energy
-                energies_found = detect_energies_in_dir(data_dir) or []
-                total = 0
-                if energies_found:
-                    import glob as _glob
-                    e0 = energies_found[0]
-                    pat = os.path.join(data_dir, f"{e0}_E1_1_?????.cbf")
-                    total = len(_glob.glob(pat))
-                if self.wedge_size.value() != wedge:
-                    self.wedge_size.setValue(wedge)
-                    self._log(f"Auto-detected wedge size: {wedge} images")
-                if total > 0 and self.total_images.value() != total:
-                    self.total_images.setValue(total)
-                    self._log(f"Auto-detected total images per sweep: {total}")
-            else:
-                self._log("Auto-wedge: could not determine wedge size from timestamps (data not yet available?)")
+        # If a previous scan is still running, let it finish — its signals
+        # will be ignored if the data_dir has changed by the time they arrive.
+        if self._scan_worker and self._scan_worker.isRunning():
+            return
 
+        self._scan_worker = _DataScanWorker(data_dir, scan_energies, scan_wedges)
+        self._scan_worker.energies_found.connect(
+            lambda energies, d=data_dir: self._on_energies_found(energies, d)
+        )
+        self._scan_worker.wedge_found.connect(
+            lambda wedge, total, d=data_dir: self._on_wedge_found(wedge, total, d)
+        )
+        self._scan_worker.start()
+
+    def _on_energies_found(self, energies: List[int], data_dir: str) -> None:
+        if data_dir != self._data_path:
+            return  # stale result from a previous data dir
+        if not energies:
+            if self._last_auto_energies != []:
+                self._last_auto_energies = []
+                self.energy_preview.setText("Energies (auto): no matching files found in Data path.")
+                self._log(f"Auto-energy scan: no energies found in {data_dir}")
+        else:
+            self.rb_energy_list.setChecked(True)
+            self._update_energy_mode()
+            self.energy_list_edit.setText(", ".join(str(e) for e in energies))
+            self.energy_preview.setText(
+                f"Energies (auto, n={len(energies)}): "
+                + ", ".join(str(e) for e in energies[:10])
+                + (" …" if len(energies) > 10 else "")
+            )
+            if self._last_auto_energies != energies:
+                self._last_auto_energies = energies
+                self._log(f"Auto-detected energies from {data_dir}: {', '.join(str(e) for e in energies)}")
+        self._refresh_previews_and_validation()
+
+    def _on_wedge_found(self, wedge: int, total: int, data_dir: str) -> None:
+        if data_dir != self._data_path:
+            return  # stale result from a previous data dir
+        if wedge > 0:
+            if self.wedge_size.value() != wedge:
+                self.wedge_size.setValue(wedge)
+                self._log(f"Auto-detected wedge size: {wedge} images")
+            if total > 0 and self.total_images.value() != total:
+                self.total_images.setValue(total)
+                self._log(f"Auto-detected total images per sweep: {total}")
+        else:
+            self._log("Auto-wedge: could not determine wedge size from timestamps (data not yet available?)")
         self._refresh_previews_and_validation()
 
     # ---------------- Validation & previews ----------------

@@ -92,11 +92,13 @@ def detect_wedge_size_in_dir(data_dir: str) -> int:
         re.IGNORECASE,
     )
     try:
-        frames = sorted(
-            (entry.path, int(m.group(1)))
-            for entry in os.scandir(data_dir)
-            if entry.is_file() and (m := frame_pat.match(entry.name))
-        , key=lambda x: x[1])
+        raw = []
+        for entry in os.scandir(data_dir):
+            if entry.is_file():
+                m = frame_pat.match(entry.name)
+                if m:
+                    raw.append((entry.path, int(m.group(1))))
+        frames = sorted(raw, key=lambda x: x[1])
     except OSError:
         return 0
 
