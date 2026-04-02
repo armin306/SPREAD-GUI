@@ -170,6 +170,8 @@ Three input methods selectable via radio buttons:
 
 For file and code methods, **Apply** is disabled until a successful parse. For manual entry, **Apply** is always enabled. On accept, the result is written to the crystal's DB settings via `patch_crystal_settings()`.
 
+When a PDB is fetched by code, the full PDB file is saved to `{proc_path}/files/{code}.pdb` if the crystal has a processing path set. This preserves the reference structure used for the experiment.
+
 ---
 
 ## 9. Processing Tab
@@ -191,7 +193,15 @@ For file and code methods, **Apply** is disabled until a successful parse. For m
 | Parameter            | Default |
 |----------------------|---------|
 | Wedge size (images)  | 300     |
-| Total images         | 3600    |
+| Total images per sweep | 3600  |
+
+**Auto-detect** (checkbox, default ON):
+- Scans the primary sweep of the first detected energy for mtime gaps between consecutive frames
+- A gap >60 s between consecutive frames marks a wedge boundary; a second matching gap is required for confirmation (guards against one-off network delays)
+- Also counts total frames in the primary sweep to populate *Total images per sweep*
+- Disables manual editing of both spinboxes while active
+- Runs in a background thread to avoid blocking the GUI on slow NFS mounts
+- Triggered on crystal load and by the same `QFileSystemWatcher` debounce as energy auto-detect
 
 The derived wedge list is previewed in the UI.
 
@@ -226,18 +236,30 @@ All SSH calls use `-o StrictHostKeyChecking=accept-new` to silently accept host 
 
 ### 10.1 Generated Files
 
-All files are written to the crystal's processing path.
+Files are written into subdirectories of the crystal's processing path:
 
-| File                    | Purpose                                  |
-|-------------------------|------------------------------------------|
-| `run_spread_submit.sh`  | Driver: iterates over energies and wedges, calls the pipeline script via `sbatch` |
-| `autoproc_jobs.sh`      | AutoProc SLURM job template              |
-| `xia2_dials_jobs.sh`    | Xia2 DIALS SLURM job template           |
-| `xia2_3dii_jobs.sh`     | Xia2 3dii SLURM job template            |
+```
+{proc_path}/
+  scripts/
+    run_spread_submit.sh    Driver: iterates energies × wedges, calls pipeline script
+    autoproc_jobs.sh        AutoProc SLURM job template
+    xia2_dials_jobs.sh      Xia2 DIALS SLURM job template
+    xia2_3dii_jobs.sh       Xia2 3dii SLURM job template
+  files/                    Reference files (PDBs fetched from RCSB, CIFs, etc.)
+```
 
 All generated scripts are marked executable.
 
-### 10.2 Validation Before Generation
+### 10.2 Multi-sweep Support
+
+When a data directory contains multiple sweeps for the same energy (e.g. `7118_E1_1_00001.cbf` and `7118_2_E1_1_00001.cbf`), the job scripts handle them automatically:
+
+- The driver script (`run_spread_submit.sh`) receives a **cumulative** image count, not a per-sweep count. Directory names reflect cumulative totals: `300img`, `3600img`, `3900img` (sweep 1 full + 300 from sweep 2), `7200img` (both sweeps full), etc.
+- At SLURM runtime each job script globs for all sweep files for that energy/counter, then derives from the cumulative count how many sweeps are fully included and how many images are needed from the current sweep.
+- All sweeps up to and including the current one are passed as separate `image=` arguments (xia2) or `-Id` arguments (AutoProc), so the pipeline scales them together automatically without a separate scaling step.
+- The energy auto-detection regex anchors to the start of the filename and requires ≥4 digits, preventing sweep-number suffixes (e.g. `_2_`) from being mistaken for energies.
+
+### 10.3 Validation Before Generation
 
 | Check                      | Error raised if…                          |
 |----------------------------|-------------------------------------------|
@@ -250,11 +272,13 @@ All generated scripts are marked executable.
 
 ## 11. Job Submission
 
-1. Scripts are generated (as above).
-2. For REST API mode: SSH to `wilson` (interactive password prompt allowed) to retrieve a short-lived SLURM JWT token via `scontrol token`.
-3. For each energy × wedge combination, a minimal wrapper script is POSTed to the DLS SLURM REST endpoint (`https://slurm-rest.diamond.ac.uk:8443/slurm/v0.0.40/job/submit`).
-4. Progress is reported in the status bar: `submitted / total`.
-5. Each submission result is logged.
+1. If `scripts/run_spread_submit.sh` already exists, a confirmation dialog asks whether to overwrite and re-submit.
+2. Scripts are generated (as above).
+3. For REST API mode: SSH to `wilson` (interactive password prompt allowed) to retrieve a short-lived SLURM JWT token via `scontrol token`.
+4. The GUI scans the data directory to discover all sweeps per energy (`detect_sweeps_for_energy`). For each energy × sweep × wedge combination, a job is submitted with the cumulative image count.
+5. For each job, a minimal wrapper script is POSTed to the DLS SLURM REST endpoint (`https://slurm-rest.diamond.ac.uk:8443/slurm/v0.0.40/job/submit`), or `sbatch` is called directly in fallback mode.
+6. Progress is reported in the status bar: `submitted / total`.
+7. Each submission result is logged.
 
 If `requests` is not available, `urllib` is used as a fallback.
 
@@ -327,9 +351,10 @@ Report generation runs in a `QThread` to keep the GUI responsive. Progress messa
 
 ## 15. Limitations
 
-- Single filename pattern supported for raw data (`<energy>_E<counter>_1_#####.cbf`).
+- Primary filename pattern: `<energy>_E<counter>_1_#####.cbf`; additional sweeps must follow the `<energy>_<N>_E<counter>_1_#####.cbf` convention.
 - Space group and unit cell must be set via Manage Projects before script generation.
 - No batch submission across multiple crystals in a single operation.
+- Wedge auto-detection requires that CBF files are accessible on a locally mounted filesystem; detection is skipped silently if the data path is unavailable.
 
 ---
 
@@ -337,5 +362,6 @@ Report generation runs in a `QThread` to keep the GUI responsive. Progress messa
 
 | Date       | Change                                                                                   |
 |------------|------------------------------------------------------------------------------------------|
+| April 2026 | Multi-sweep support: cumulative wedge directories, per-sweep image ranges, automatic sweep discovery at runtime; wedge auto-detection from CBF timestamps (background thread); scripts and files moved to `scripts/` and `files/` subdirectories; PDB saving restored |
 | April 2026 | Full rewrite: project/crystal DB, Manage Projects dialog, SgCellDialog, Analysis tab, header bar, REST API submission, removal of path fields from Processing tab |
 | March 2026 | Initial specification aligned with DLS software documentation conventions                |
