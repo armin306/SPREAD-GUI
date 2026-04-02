@@ -31,7 +31,7 @@ from PyQt6.QtWidgets import (
 from spread_gui.core.model import Cell
 from spread_gui.core.paths import VISIT_RE, detect_visit_from_path, infer_visit_root
 from spread_gui.core.cryst import normalize_sg_name
-from spread_gui.core.energies import compute_energy_list, detect_energies_in_dir, detect_sweeps_for_energy
+from spread_gui.core.energies import compute_energy_list, detect_energies_in_dir, detect_sweeps_for_energy, detect_wedge_size_in_dir
 from spread_gui.core.wedges import compute_wedges
 
 from spread_gui.services.database import ProjectDB
@@ -79,6 +79,9 @@ class ProcessingTab(QWidget):
 
         self._build_ui()
         self._wire_signals()
+        # Spinboxes disabled by default since auto-detect checkbox starts checked
+        self.wedge_size.setEnabled(False)
+        self.total_images.setEnabled(False)
         self._apply_defaults_from_cwd()
         self._loading = True
         self._load_settings()
@@ -165,21 +168,26 @@ class ProcessingTab(QWidget):
         # Wedges (defaults: 30 / 360)
         w_box = QGroupBox("Wedge definition")
         wg = QGridLayout(w_box)
-        wg.addWidget(QLabel("Wedge size:"), 0, 0)
+
+        self.chk_auto_wedges = QCheckBox("Auto-detect wedge size from Data path")
+        self.chk_auto_wedges.setChecked(True)
+        wg.addWidget(self.chk_auto_wedges, 0, 0, 1, 4)
+
+        wg.addWidget(QLabel("Wedge size:"), 1, 0)
         self.wedge_size = QSpinBox()
         self.wedge_size.setRange(1, 1000000)
         self.wedge_size.setValue(300)
-        wg.addWidget(self.wedge_size, 0, 1)
+        wg.addWidget(self.wedge_size, 1, 1)
 
-        wg.addWidget(QLabel("Total number of images:"), 0, 2)
+        wg.addWidget(QLabel("Total number of images:"), 1, 2)
         self.total_images = QSpinBox()
         self.total_images.setRange(1, 100000000)
         self.total_images.setValue(3600)
-        wg.addWidget(self.total_images, 0, 3)
+        wg.addWidget(self.total_images, 1, 3)
 
         self.wedge_preview = QLabel("")
         self.wedge_preview.setStyleSheet("color:#666;")
-        wg.addWidget(self.wedge_preview, 1, 0, 1, 4)
+        wg.addWidget(self.wedge_preview, 2, 0, 1, 4)
         root.addWidget(w_box)
 
         # Pipeline selection
@@ -267,6 +275,8 @@ class ProcessingTab(QWidget):
         self.energy_inc.valueChanged.connect(self._schedule_autosave)
         self.energy_list_edit.textChanged.connect(self._schedule_autosave)
 
+        self.chk_auto_wedges.toggled.connect(self._auto_wedges_toggled)
+        self.chk_auto_wedges.toggled.connect(self._schedule_autosave)
         self.wedge_size.valueChanged.connect(self._refresh_previews_and_validation)
         self.total_images.valueChanged.connect(self._refresh_previews_and_validation)
         self.wedge_size.valueChanged.connect(self._schedule_autosave)
@@ -335,6 +345,7 @@ class ProcessingTab(QWidget):
             "wedge_size":    str(self.wedge_size.value()),
             "total_images":  str(self.total_images.value()),
             "auto_energies": str(self.chk_auto_energies.isChecked()),
+            "auto_wedges":   str(self.chk_auto_wedges.isChecked()),
         }
 
     def _apply_form_state(self, s: dict) -> None:
@@ -412,6 +423,11 @@ class ProcessingTab(QWidget):
 
         if "auto_energies" in s:
             self.chk_auto_energies.setChecked(s["auto_energies"].lower() == "true")
+        if "auto_wedges" in s:
+            checked = s["auto_wedges"].lower() == "true"
+            self.chk_auto_wedges.setChecked(checked)
+            self.wedge_size.setEnabled(not checked)
+            self.total_images.setEnabled(not checked)
 
     def _cell_str(self) -> str:
         c = self._cell
@@ -520,8 +536,16 @@ class ProcessingTab(QWidget):
             self._update_energy_mode()
             self._refresh_previews_and_validation()
 
+    def _auto_wedges_toggled(self, enabled: bool) -> None:
+        self.wedge_size.setEnabled(not enabled)
+        self.total_images.setEnabled(not enabled)
+        if enabled:
+            self._schedule_energy_scan()
+        else:
+            self._refresh_previews_and_validation()
+
     def _schedule_energy_scan(self) -> None:
-        if not self.chk_auto_energies.isChecked():
+        if not self.chk_auto_energies.isChecked() and not self.chk_auto_wedges.isChecked():
             return
         self._energy_scan_timer.start(300)
 
@@ -552,32 +576,48 @@ class ProcessingTab(QWidget):
             self._watched_data_dir = None
 
     def _auto_update_energies_from_data_dir(self) -> None:
-        if not self.chk_auto_energies.isChecked():
-            return
         data_dir = self._data_path
         self._set_watched_directory(data_dir)
 
-        energies = detect_energies_in_dir(data_dir)
-        if not energies:
-            if self._last_auto_energies != []:
-                self._last_auto_energies = []
-                self.energy_preview.setText("Energies (auto): no matching files found in Data path.")
-                self._log(f"Auto-energy scan: no energies found in {data_dir}")
-            return
+        if self.chk_auto_energies.isChecked():
+            energies = detect_energies_in_dir(data_dir)
+            if not energies:
+                if self._last_auto_energies != []:
+                    self._last_auto_energies = []
+                    self.energy_preview.setText("Energies (auto): no matching files found in Data path.")
+                    self._log(f"Auto-energy scan: no energies found in {data_dir}")
+            else:
+                self.rb_energy_list.setChecked(True)
+                self._update_energy_mode()
+                self.energy_list_edit.setText(", ".join(str(e) for e in energies))
+                self.energy_preview.setText(
+                    f"Energies (auto, n={len(energies)}): "
+                    + ", ".join(str(e) for e in energies[:10])
+                    + (" …" if len(energies) > 10 else "")
+                )
+                if self._last_auto_energies != energies:
+                    self._last_auto_energies = energies
+                    self._log(f"Auto-detected energies from {data_dir}: {', '.join(str(e) for e in energies)}")
 
-        self.rb_energy_list.setChecked(True)
-        self._update_energy_mode()
-
-        self.energy_list_edit.setText(", ".join(str(e) for e in energies))
-        self.energy_preview.setText(
-            f"Energies (auto, n={len(energies)}): "
-            + ", ".join(str(e) for e in energies[:10])
-            + (" …" if len(energies) > 10 else "")
-        )
-
-        if self._last_auto_energies != energies:
-            self._last_auto_energies = energies
-            self._log(f"Auto-detected energies from {data_dir}: {', '.join(str(e) for e in energies)}")
+        if self.chk_auto_wedges.isChecked():
+            wedge = detect_wedge_size_in_dir(data_dir)
+            if wedge > 0:
+                # Count total frames for the primary sweep of the first energy
+                energies_found = detect_energies_in_dir(data_dir) or []
+                total = 0
+                if energies_found:
+                    import glob as _glob
+                    e0 = energies_found[0]
+                    pat = os.path.join(data_dir, f"{e0}_E1_1_?????.cbf")
+                    total = len(_glob.glob(pat))
+                if self.wedge_size.value() != wedge:
+                    self.wedge_size.setValue(wedge)
+                    self._log(f"Auto-detected wedge size: {wedge} images")
+                if total > 0 and self.total_images.value() != total:
+                    self.total_images.setValue(total)
+                    self._log(f"Auto-detected total images per sweep: {total}")
+            else:
+                self._log("Auto-wedge: could not determine wedge size from timestamps (data not yet available?)")
 
         self._refresh_previews_and_validation()
 
