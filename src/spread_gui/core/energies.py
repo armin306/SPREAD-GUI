@@ -123,12 +123,14 @@ def detect_wedge_size_in_dir(data_dir: str) -> int:
     if wedge_size == 0:
         return 0
 
-    # Consistency check: verify the next expected boundary also has a gap >60 s
+    # Consistency check: verify the next expected boundary also has a gap >60 s.
+    # The gap is AFTER the last frame of the wedge (frame wedge_size*2), i.e.
+    # between index idx and idx+1.
     next_boundary = wedge_size * 2
     frame_nums = [f[1] for f in frames]
     if next_boundary in frame_nums:
         idx = frame_nums.index(next_boundary)
-        if mtimes[idx] - mtimes[idx - 1] <= 60:
+        if idx + 1 < len(mtimes) and mtimes[idx + 1] - mtimes[idx] <= 60:
             return 0  # No matching gap at second boundary — unreliable
 
     return wedge_size
