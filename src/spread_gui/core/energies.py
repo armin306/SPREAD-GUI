@@ -38,7 +38,7 @@ def detect_sweeps_for_energy(data_dir: str, energy: int, counter: int) -> List[i
     if os.path.isfile(os.path.join(data_dir, f"{energy}_E{counter}_1_00001.cbf")):
         sweeps.append(0)
     pat = re.compile(
-        rf"^{re.escape(str(energy))}_(\d+)_E{counter}_1_\d{{5}}\.cbf$",
+        rf"^{re.escape(str(energy))}_(\d+)_E{counter}_1_00001\.cbf$",
         re.IGNORECASE,
     )
     try:
