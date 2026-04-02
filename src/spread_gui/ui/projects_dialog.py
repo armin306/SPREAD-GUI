@@ -16,6 +16,7 @@ Layout
 """
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Optional
 
@@ -413,7 +414,9 @@ class ManageProjectsDialog(QDialog):
         except (TypeError, ValueError):
             current_cell = None
 
-        dlg = SgCellDialog(current_sg, current_cell, self)
+        proc_path = settings.get("proc_path", "")
+        files_dir = os.path.join(proc_path, "files") if proc_path else ""
+        dlg = SgCellDialog(current_sg, current_cell, self, files_dir=files_dir)
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
 

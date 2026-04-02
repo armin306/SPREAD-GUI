@@ -53,6 +53,7 @@ class SgCellDialog(QDialog):
         current_sg: str = "",
         current_cell: Optional[Cell] = None,
         parent: QWidget | None = None,
+        files_dir: str = "",
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Set Space Group & Unit Cell")
@@ -60,6 +61,7 @@ class SgCellDialog(QDialog):
 
         self.space_group: Optional[str] = None
         self.cell: Optional[Cell] = None
+        self._files_dir = files_dir
 
         self._build_ui(current_sg, current_cell)
 
@@ -263,18 +265,36 @@ class SgCellDialog(QDialog):
         self._btn_fetch.setEnabled(True)
         self._fetch_status.setText(f"Fetched {code}")
 
-        # Parse CRYST1 directly from the text without saving a file
+        # Save to files/ directory if available, otherwise use a temp file.
         import tempfile
-        with tempfile.NamedTemporaryFile(mode="wt", suffix=".pdb", delete=False) as tf:
-            tf.write(text)
-            tmp_path = tf.name
-        try:
-            cell, sg = parse_pdb_cryst1(tmp_path)
-        finally:
+        saved_path: Optional[str] = None
+        if self._files_dir:
+            os.makedirs(self._files_dir, exist_ok=True)
+            saved_path = os.path.join(self._files_dir, f"{code}.pdb")
             try:
-                os.unlink(tmp_path)
+                with open(saved_path, "wt") as fh:
+                    fh.write(text)
             except OSError:
-                pass
+                saved_path = None
+
+        if saved_path:
+            pdb_path = saved_path
+            cleanup = False
+        else:
+            tf = tempfile.NamedTemporaryFile(mode="wt", suffix=".pdb", delete=False)
+            tf.write(text)
+            tf.close()
+            pdb_path = tf.name
+            cleanup = True
+
+        try:
+            cell, sg = parse_pdb_cryst1(pdb_path)
+        finally:
+            if cleanup:
+                try:
+                    os.unlink(pdb_path)
+                except OSError:
+                    pass
 
         self._show_pdb_result(cell, sg, source=f"PDB:{code}")
 

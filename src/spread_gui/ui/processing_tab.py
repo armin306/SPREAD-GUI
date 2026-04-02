@@ -623,11 +623,14 @@ class ProcessingTab(QWidget):
     # ---------------- Script generation ----------------
     def _script_paths(self) -> Tuple[str, str, str, str]:
         proc_dir = self._proc_path or os.getcwd()
-        os.makedirs(proc_dir, exist_ok=True)
-        submit_script = os.path.join(proc_dir, "run_spread_submit.sh")
-        ap = os.path.join(proc_dir, "autoproc_jobs.sh")
-        dials = os.path.join(proc_dir, "xia2_dials_jobs.sh")
-        d3 = os.path.join(proc_dir, "xia2_3dii_jobs.sh")
+        scripts_dir = os.path.join(proc_dir, "scripts")
+        files_dir = os.path.join(proc_dir, "files")
+        os.makedirs(scripts_dir, exist_ok=True)
+        os.makedirs(files_dir, exist_ok=True)
+        submit_script = os.path.join(scripts_dir, "run_spread_submit.sh")
+        ap = os.path.join(scripts_dir, "autoproc_jobs.sh")
+        dials = os.path.join(scripts_dir, "xia2_dials_jobs.sh")
+        d3 = os.path.join(scripts_dir, "xia2_3dii_jobs.sh")
         return submit_script, ap, dials, d3
 
     def _validate_before_generate(self) -> Tuple[List[int], List[int]]:
@@ -667,7 +670,7 @@ counter=0
 for energy in ${{ENERGY_LIST}}; do
   counter=$((counter+1))
   for images in ${{WEDGE_LIST}}; do
-    sbatch {pipeline_script} "$energy" "$images" "$counter"
+    sbatch scripts/{pipeline_script} "$energy" "$images" "$counter"
   done
 done
 """
@@ -694,8 +697,22 @@ mkdir -p "$images_dir"
 cd "$images_dir" || exit 1
 [ -f "aP.log" ] && rm "aP.log"
 rm -rf autoPROC
+id_args=()
+[ -f "${{DATA_DIR}}/${{energy}}_E${{counter}}_1_00001.cbf" ] && \\
+    id_args+=("-Id" "name,${{DATA_DIR}},${{energy}}_E${{counter}}_1_#####.cbf,1,${{images}}")
+for extra in ${{DATA_DIR}}/${{energy}}_[0-9]*_E${{counter}}_1_00001.cbf; do
+    if [ -f "$extra" ]; then
+        base=$(basename "$extra")
+        template="${{base/_00001.cbf/_#####.cbf}}"
+        id_args+=("-Id" "name,${{DATA_DIR}},$template,1,${{images}}")
+    fi
+done
+if [ ${{#id_args[@]}} -eq 0 ]; then
+    echo "No CBF files found for energy ${{energy}} eV (E${{counter}})" >&2
+    exit 1
+fi
 process -M DiamondI23 \\
-  -Id "name,${{DATA_DIR}},${{energy}}_E${{counter}}_1_#####.cbf,1,${{images}}" \\
+  "${{id_args[@]}}" \\
   -d autoPROC \\
   cell="{cell.as_autoproc_string()}" \\
   symm="{sg}" > aP.log
@@ -723,8 +740,18 @@ mkdir -p "$images_dir"
 cd "$images_dir" || exit 1
 mkdir -p xia2-dials
 cd xia2-dials
+image_args=()
+primary="${{DATA_DIR}}/${{energy}}_E${{counter}}_1_00001.cbf"
+[ -f "$primary" ] && image_args+=("image=$primary:1:${{images}}")
+for extra in ${{DATA_DIR}}/${{energy}}_[0-9]*_E${{counter}}_1_00001.cbf; do
+    [ -f "$extra" ] && image_args+=("image=$extra:1:${{images}}")
+done
+if [ ${{#image_args[@]}} -eq 0 ]; then
+    echo "No CBF files found for energy ${{energy}} eV (E${{counter}})" >&2
+    exit 1
+fi
 xia2 pipeline=dials \\
-  image=${{DATA_DIR}}/${{energy}}_E${{counter}}_1_00001.cbf:1:${{images}} \\
+  "${{image_args[@]}}" \\
   read_all_image_headers=False \\
   trust_beam_centre=True \\
   keep_outliers=True \\
@@ -757,8 +784,18 @@ mkdir -p "$images_dir"
 cd "$images_dir" || exit 1
 mkdir -p xia2-3dii
 cd xia2-3dii
+image_args=()
+primary="${{DATA_DIR}}/${{energy}}_E${{counter}}_1_00001.cbf"
+[ -f "$primary" ] && image_args+=("image=$primary:1:${{images}}")
+for extra in ${{DATA_DIR}}/${{energy}}_[0-9]*_E${{counter}}_1_00001.cbf; do
+    [ -f "$extra" ] && image_args+=("image=$extra:1:${{images}}")
+done
+if [ ${{#image_args[@]}} -eq 0 ]; then
+    echo "No CBF files found for energy ${{energy}} eV (E${{counter}})" >&2
+    exit 1
+fi
 xia2 pipeline=3dii \\
-  image=${{DATA_DIR}}/${{energy}}_E${{counter}}_1_00001.cbf:1:${{images}} \\
+  "${{image_args[@]}}" \\
   read_all_image_headers=False \\
   trust_beam_centre=True \\
   keep_outliers=True \\
@@ -862,7 +899,7 @@ xia2 pipeline=3dii \\
             return
 
         proc_dir = self._proc_path
-        submit_script_path = os.path.join(proc_dir, "run_spread_submit.sh")
+        submit_script_path = os.path.join(proc_dir, "scripts", "run_spread_submit.sh")
         if os.path.isfile(submit_script_path):
             ans = QMessageBox.question(
                 self,
@@ -891,7 +928,7 @@ xia2 pipeline=3dii \\
             "xia2_3dii": "xia2_3dii_jobs.sh",
         }[pipeline]
 
-        script_path = os.path.join(proc_dir, pipeline_script)
+        script_path = os.path.join(proc_dir, "scripts", pipeline_script)
         if not os.path.isfile(script_path):
             self._warn("Missing script", f"Job script not found:\n{script_path}")
             return
@@ -943,7 +980,7 @@ xia2 pipeline=3dii \\
                         wrapper, proc_dir, token, dry_run=dry
                     )
                 else:
-                    cmd = ["sbatch", pipeline_script, str(e), str(a), str(counter)]
+                    cmd = ["sbatch", os.path.join("scripts", pipeline_script), str(e), str(a), str(counter)]
                     rc, out, err = run_sbatch(cmd, cwd=proc_dir, dry_run=dry)
 
                 if dry:
