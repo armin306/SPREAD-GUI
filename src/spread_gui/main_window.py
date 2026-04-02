@@ -173,6 +173,9 @@ class MainWindow(QMainWindow):
         # ---- Signals ----
         self.proc_tab.crystal_context_changed.connect(self._on_crystal_context_changed)
         self.proc_tab.processing_info_changed.connect(self._on_processing_info_changed)
+        self.proc_tab.processing_info_changed.connect(
+            lambda _d, proc, _sg, _c: self.analysis_tab.set_proc_path(proc)
+        )
 
         # Restore header from the crystal that was active in the previous session.
         cid = self.proc_tab.current_crystal_id

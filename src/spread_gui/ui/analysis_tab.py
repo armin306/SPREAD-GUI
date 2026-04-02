@@ -9,12 +9,10 @@ from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from PyQt6.QtGui import QFont
 from PyQt6.QtWidgets import (
     QDialog,
-    QFileDialog,
     QGroupBox,
     QHBoxLayout,
     QInputDialog,
     QLabel,
-    QLineEdit,
     QMessageBox,
     QPushButton,
     QRadioButton,
@@ -125,6 +123,7 @@ class AnalysisTab(QWidget):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._worker: _AnalysisWorker | None = None
+        self._proc_path: str = ""
         self._build_ui()
         self._load_settings()
 
@@ -146,11 +145,9 @@ class AnalysisTab(QWidget):
         g = QGridLayout(in_box)
 
         g.addWidget(QLabel("Processing path:"), 0, 0)
-        self.proc_path_edit = QLineEdit()
-        self.proc_path_edit.setPlaceholderText("Directory containing {energy}eV sub-directories")
-        self.btn_browse = QPushButton("Browse\u2026")
-        g.addWidget(self.proc_path_edit, 0, 1)
-        g.addWidget(self.btn_browse, 0, 2)
+        self.proc_path_label = QLabel("\u2014")
+        self.proc_path_label.setStyleSheet("color:#444;")
+        g.addWidget(self.proc_path_label, 0, 1, 1, 2)
 
         g.addWidget(QLabel("Pipeline:"), 1, 0)
         pl_row = QHBoxLayout()
@@ -188,9 +185,7 @@ class AnalysisTab(QWidget):
         root.addWidget(self.log, 1)
 
         # Signals
-        self.btn_browse.clicked.connect(self._browse_proc)
         self.btn_run.clicked.connect(self._run_analysis)
-        self.proc_path_edit.textChanged.connect(self._update_out_label)
         self.rb_dials.toggled.connect(self._update_out_label)
 
     # ---- Helpers ----
@@ -198,20 +193,19 @@ class AnalysisTab(QWidget):
     def _pipeline(self) -> str:
         return "xia2-dials" if self.rb_dials.isChecked() else "xia2-3dii"
 
+    def set_proc_path(self, path: str) -> None:
+        """Called by MainWindow when the loaded crystal changes."""
+        self._proc_path = path
+        self.proc_path_label.setText(path if path else "\u2014")
+        self._update_out_label()
+
     def _default_out_dir(self) -> str:
-        proc = self.proc_path_edit.text().strip()
-        if not proc:
+        if not self._proc_path:
             return ""
-        return str(Path(proc) / "results" / self._pipeline())
+        return str(Path(self._proc_path) / "results" / self._pipeline())
 
     def _update_out_label(self) -> None:
         self.out_dir_label.setText(self._default_out_dir())
-
-    def _browse_proc(self) -> None:
-        start = self.proc_path_edit.text() or str(Path.home())
-        d = QFileDialog.getExistingDirectory(self, "Select processing directory", start)
-        if d:
-            self.proc_path_edit.setText(d)
 
     def _log(self, msg: str) -> None:
         self.log.append(msg)
@@ -220,7 +214,7 @@ class AnalysisTab(QWidget):
     # ---- Settings ----
 
     def _load_settings(self) -> None:
-        """Pre-populate proc path and pipeline from shared settings.ini."""
+        """Pre-populate pipeline selection from shared settings.ini."""
         cfg = configparser.ConfigParser()
         if not _CONFIG_PATH.exists():
             return
@@ -228,8 +222,6 @@ class AnalysisTab(QWidget):
         if "spread_gui" not in cfg:
             return
         s = cfg["spread_gui"]
-        if "proc_path" in s:
-            self.proc_path_edit.setText(s["proc_path"])
         pipeline = s.get("pipeline", "")
         if pipeline == "xia2_dials":
             self.rb_dials.setChecked(True)
@@ -243,9 +235,9 @@ class AnalysisTab(QWidget):
         if self._worker and self._worker.isRunning():
             return
 
-        proc_path = self.proc_path_edit.text().strip()
+        proc_path = self._proc_path
         if not proc_path:
-            QMessageBox.warning(self, "Missing input", "Please set the processing path.")
+            QMessageBox.warning(self, "Missing input", "No processing path set — load a crystal first.")
             return
         if not os.path.isdir(proc_path):
             QMessageBox.warning(self, "Invalid path", f"Directory not found:\n{proc_path}")

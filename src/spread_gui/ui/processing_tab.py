@@ -855,6 +855,26 @@ xia2 pipeline=3dii \\
         self._info("Scripts generated", f"Generated scripts in:\n{proc_dir}")
 
     def submit_jobs(self) -> None:
+        try:
+            _, _ = self._validate_before_generate()
+        except Exception as e:
+            self._warn("Invalid inputs", str(e))
+            return
+
+        proc_dir = self._proc_path
+        submit_script_path = os.path.join(proc_dir, "run_spread_submit.sh")
+        if os.path.isfile(submit_script_path):
+            ans = QMessageBox.question(
+                self,
+                "Processing already exists",
+                f"A previous submission was found in:\n{proc_dir}\n\n"
+                "Overwrite and re-submit?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Cancel,
+            )
+            if ans != QMessageBox.StandardButton.Yes:
+                return
+
         self.generate_scripts()
 
         try:
