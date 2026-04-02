@@ -31,7 +31,7 @@ from PyQt6.QtWidgets import (
 from spread_gui.core.model import Cell
 from spread_gui.core.paths import VISIT_RE, detect_visit_from_path, infer_visit_root
 from spread_gui.core.cryst import normalize_sg_name
-from spread_gui.core.energies import compute_energy_list, detect_energies_in_dir
+from spread_gui.core.energies import compute_energy_list, detect_energies_in_dir, detect_sweeps_for_energy
 from spread_gui.core.wedges import compute_wedges
 
 from spread_gui.services.database import ProjectDB
@@ -659,23 +659,43 @@ class ProcessingTab(QWidget):
 
         return energies, wedges
 
-    def _make_driver_script(self, energies: List[int], wedges: List[int], pipeline_script: str) -> str:
+    def _make_driver_script(
+        self,
+        energies: List[int],
+        wedges: List[int],
+        pipeline_script: str,
+        data_dir: str,
+        total_images: int,
+    ) -> str:
         energy_list = " ".join(str(e) for e in energies)
         wedge_list = " ".join(str(w) for w in wedges)
         return f"""#!/bin/bash
 BASE_DIR=$(pwd)
+DATA_DIR="{data_dir}"
 ENERGY_LIST="{energy_list}"
 WEDGE_LIST="{wedge_list}"
+TOTAL_IMAGES={total_images}
 counter=0
 for energy in ${{ENERGY_LIST}}; do
   counter=$((counter+1))
-  for images in ${{WEDGE_LIST}}; do
-    sbatch scripts/{pipeline_script} "$energy" "$images" "$counter"
+  # Discover all sweeps for this energy/counter
+  sweeps=()
+  [ -f "${{DATA_DIR}}/${{energy}}_E${{counter}}_1_00001.cbf" ] && sweeps+=("primary")
+  for extra in ${{DATA_DIR}}/${{energy}}_[0-9]*_E${{counter}}_1_00001.cbf; do
+    [ -f "$extra" ] && sweeps+=("$extra")
+  done
+  sweep_index=0
+  for sweep in "${{sweeps[@]}}"; do
+    for images in ${{WEDGE_LIST}}; do
+      cumulative=$((sweep_index * TOTAL_IMAGES + images))
+      sbatch scripts/{pipeline_script} "$energy" "$cumulative" "$counter"
+    done
+    sweep_index=$((sweep_index + 1))
   done
 done
 """
 
-    def _make_autoproc_job(self, data_dir: str, cell: Cell, sg: str) -> str:
+    def _make_autoproc_job(self, data_dir: str, cell: Cell, sg: str, total_images: int) -> str:
         return f"""#!/bin/bash
 . /etc/profile.d/modules.sh
 #SBATCH --job-name=autoPROC_job
@@ -688,29 +708,37 @@ done
 module load autoPROC
 BASE_DIR=$(pwd)
 DATA_DIR="{data_dir}"
+TOTAL_IMAGES={total_images}
 energy=$1
-images=$2
+cumulative=$2
 counter=$3
+sweep_index=$(( (cumulative - 1) / TOTAL_IMAGES ))
+images_in_current=$(( (cumulative - 1) % TOTAL_IMAGES + 1 ))
 energy_dir="${{BASE_DIR}}/${{energy}}eV"
-images_dir="${{energy_dir}}/${{images}}img"
+images_dir="${{energy_dir}}/${{cumulative}}img"
 mkdir -p "$images_dir"
 cd "$images_dir" || exit 1
 [ -f "aP.log" ] && rm "aP.log"
 rm -rf autoPROC
-id_args=()
-[ -f "${{DATA_DIR}}/${{energy}}_E${{counter}}_1_00001.cbf" ] && \\
-    id_args+=("-Id" "name,${{DATA_DIR}},${{energy}}_E${{counter}}_1_#####.cbf,1,${{images}}")
+sweeps=()
+[ -f "${{DATA_DIR}}/${{energy}}_E${{counter}}_1_00001.cbf" ] && sweeps+=("${{DATA_DIR}}/${{energy}}_E${{counter}}_1_00001.cbf")
 for extra in ${{DATA_DIR}}/${{energy}}_[0-9]*_E${{counter}}_1_00001.cbf; do
-    if [ -f "$extra" ]; then
-        base=$(basename "$extra")
-        template="${{base/_00001.cbf/_#####.cbf}}"
-        id_args+=("-Id" "name,${{DATA_DIR}},$template,1,${{images}}")
-    fi
+    [ -f "$extra" ] && sweeps+=("$extra")
 done
-if [ ${{#id_args[@]}} -eq 0 ]; then
+if [ ${{#sweeps[@]}} -eq 0 ]; then
     echo "No CBF files found for energy ${{energy}} eV (E${{counter}})" >&2
     exit 1
 fi
+id_args=()
+for i in "${{!sweeps[@]}}"; do
+    base=$(basename "${{sweeps[$i]}}")
+    template="${{base/_00001.cbf/_#####.cbf}}"
+    if [ "$i" -lt "$sweep_index" ]; then
+        id_args+=("-Id" "name,${{DATA_DIR}},$template,1,${{TOTAL_IMAGES}}")
+    elif [ "$i" -eq "$sweep_index" ]; then
+        id_args+=("-Id" "name,${{DATA_DIR}},$template,1,${{images_in_current}}")
+    fi
+done
 process -M DiamondI23 \\
   "${{id_args[@]}}" \\
   -d autoPROC \\
@@ -718,7 +746,7 @@ process -M DiamondI23 \\
   symm="{sg}" > aP.log
 """
 
-    def _make_xia2_dials_job(self, data_dir: str, cell: Cell, sg: str, project: str, crystal: str) -> str:
+    def _make_xia2_dials_job(self, data_dir: str, cell: Cell, sg: str, project: str, crystal: str, total_images: int) -> str:
         return f"""#!/bin/bash
 . /etc/profile.d/modules.sh
 #SBATCH --job-name=xia2_dials_job
@@ -731,25 +759,35 @@ process -M DiamondI23 \\
 module load xia2
 BASE_DIR=$(pwd)
 DATA_DIR="{data_dir}"
+TOTAL_IMAGES={total_images}
 energy=$1
-images=$2
+cumulative=$2
 counter=$3
+sweep_index=$(( (cumulative - 1) / TOTAL_IMAGES ))
+images_in_current=$(( (cumulative - 1) % TOTAL_IMAGES + 1 ))
 energy_dir="${{BASE_DIR}}/${{energy}}eV"
-images_dir="${{energy_dir}}/${{images}}img"
+images_dir="${{energy_dir}}/${{cumulative}}img"
 mkdir -p "$images_dir"
 cd "$images_dir" || exit 1
 mkdir -p xia2-dials
 cd xia2-dials
-image_args=()
-primary="${{DATA_DIR}}/${{energy}}_E${{counter}}_1_00001.cbf"
-[ -f "$primary" ] && image_args+=("image=$primary:1:${{images}}")
+sweeps=()
+[ -f "${{DATA_DIR}}/${{energy}}_E${{counter}}_1_00001.cbf" ] && sweeps+=("${{DATA_DIR}}/${{energy}}_E${{counter}}_1_00001.cbf")
 for extra in ${{DATA_DIR}}/${{energy}}_[0-9]*_E${{counter}}_1_00001.cbf; do
-    [ -f "$extra" ] && image_args+=("image=$extra:1:${{images}}")
+    [ -f "$extra" ] && sweeps+=("$extra")
 done
-if [ ${{#image_args[@]}} -eq 0 ]; then
+if [ ${{#sweeps[@]}} -eq 0 ]; then
     echo "No CBF files found for energy ${{energy}} eV (E${{counter}})" >&2
     exit 1
 fi
+image_args=()
+for i in "${{!sweeps[@]}}"; do
+    if [ "$i" -lt "$sweep_index" ]; then
+        image_args+=("image=${{sweeps[$i]}}:1:${{TOTAL_IMAGES}}")
+    elif [ "$i" -eq "$sweep_index" ]; then
+        image_args+=("image=${{sweeps[$i]}}:1:${{images_in_current}}")
+    fi
+done
 xia2 pipeline=dials \\
   "${{image_args[@]}}" \\
   read_all_image_headers=False \\
@@ -762,7 +800,7 @@ xia2 pipeline=dials \\
   crystal={crystal}
 """
 
-    def _make_xia2_3dii_job(self, data_dir: str, cell: Cell, sg: str, project: str, crystal: str) -> str:
+    def _make_xia2_3dii_job(self, data_dir: str, cell: Cell, sg: str, project: str, crystal: str, total_images: int) -> str:
         return f"""#!/bin/bash
 . /etc/profile.d/modules.sh
 #SBATCH --job-name=xia2_3dii_job
@@ -775,25 +813,35 @@ xia2 pipeline=dials \\
 module load xia2
 BASE_DIR=$(pwd)
 DATA_DIR="{data_dir}"
+TOTAL_IMAGES={total_images}
 energy=$1
-images=$2
+cumulative=$2
 counter=$3
+sweep_index=$(( (cumulative - 1) / TOTAL_IMAGES ))
+images_in_current=$(( (cumulative - 1) % TOTAL_IMAGES + 1 ))
 energy_dir="${{BASE_DIR}}/${{energy}}eV"
-images_dir="${{energy_dir}}/${{images}}img"
+images_dir="${{energy_dir}}/${{cumulative}}img"
 mkdir -p "$images_dir"
 cd "$images_dir" || exit 1
 mkdir -p xia2-3dii
 cd xia2-3dii
-image_args=()
-primary="${{DATA_DIR}}/${{energy}}_E${{counter}}_1_00001.cbf"
-[ -f "$primary" ] && image_args+=("image=$primary:1:${{images}}")
+sweeps=()
+[ -f "${{DATA_DIR}}/${{energy}}_E${{counter}}_1_00001.cbf" ] && sweeps+=("${{DATA_DIR}}/${{energy}}_E${{counter}}_1_00001.cbf")
 for extra in ${{DATA_DIR}}/${{energy}}_[0-9]*_E${{counter}}_1_00001.cbf; do
-    [ -f "$extra" ] && image_args+=("image=$extra:1:${{images}}")
+    [ -f "$extra" ] && sweeps+=("$extra")
 done
-if [ ${{#image_args[@]}} -eq 0 ]; then
+if [ ${{#sweeps[@]}} -eq 0 ]; then
     echo "No CBF files found for energy ${{energy}} eV (E${{counter}})" >&2
     exit 1
 fi
+image_args=()
+for i in "${{!sweeps[@]}}"; do
+    if [ "$i" -lt "$sweep_index" ]; then
+        image_args+=("image=${{sweeps[$i]}}:1:${{TOTAL_IMAGES}}")
+    elif [ "$i" -eq "$sweep_index" ]; then
+        image_args+=("image=${{sweeps[$i]}}:1:${{images_in_current}}")
+    fi
+done
 xia2 pipeline=3dii \\
   "${{image_args[@]}}" \\
   read_all_image_headers=False \\
@@ -861,10 +909,11 @@ xia2 pipeline=3dii \\
             "xia2_3dii": "xia2_3dii_jobs.sh",
         }[pipeline]
 
-        driver = self._make_driver_script(energies, wedges, pipeline_script)
-        ap_txt = self._make_autoproc_job(data_dir, cell, sg)
-        dials_txt = self._make_xia2_dials_job(data_dir, cell, sg, project, crystal)
-        d3_txt = self._make_xia2_3dii_job(data_dir, cell, sg, project, crystal)
+        total_images = int(self.total_images.value())
+        driver = self._make_driver_script(energies, wedges, pipeline_script, data_dir, total_images)
+        ap_txt = self._make_autoproc_job(data_dir, cell, sg, total_images)
+        dials_txt = self._make_xia2_dials_job(data_dir, cell, sg, project, crystal, total_images)
+        d3_txt = self._make_xia2_3dii_job(data_dir, cell, sg, project, crystal, total_images)
 
         try:
             with open(submit_script, "wt") as f:
@@ -933,7 +982,19 @@ xia2 pipeline=3dii \\
             self._warn("Missing script", f"Job script not found:\n{script_path}")
             return
 
-        total = len(energies) * len(wedges)
+        # Build full job list: (energy, cumulative_images, counter)
+        total_images_per_sweep = int(self.total_images.value())
+        jobs: List[Tuple[int, int, int]] = []
+        counter = 0
+        for e in energies:
+            counter += 1
+            sweeps = detect_sweeps_for_energy(self._data_path, e, counter)
+            for sweep_idx in range(len(sweeps)):
+                offset = sweep_idx * total_images_per_sweep
+                for a in wedges:
+                    jobs.append((e, offset + a, counter))
+
+        total = len(jobs)
         if total <= 0:
             self._warn("Nothing to submit", "No jobs to submit.")
             return
@@ -961,34 +1022,31 @@ xia2 pipeline=3dii \\
             mw.set_status(f"{'Dry-run' if dry else 'Submitting'} {total} jobs…", 0, total)
 
         submitted = 0
-        counter = 0
-        for e in energies:
-            counter += 1
-            for a in wedges:
-                submitted += 1
-                if hasattr(mw, "set_status"):
-                    mw.set_status("Submitting jobs…", submitted, total)
+        for e, cumulative, ctr in jobs:
+            submitted += 1
+            if hasattr(mw, "set_status"):
+                mw.set_status("Submitting jobs…", submitted, total)
 
-                if use_rest:
-                    # Minimal wrapper: the pipeline script already lives on the
-                    # shared filesystem and is accessible from the cluster nodes.
-                    wrapper = (
-                        f"#!/bin/bash\n"
-                        f"bash {shlex.quote(script_path)} {e} {a} {counter}\n"
-                    )
-                    rc, out, err = submit_job_via_rest_api(
-                        wrapper, proc_dir, token, dry_run=dry
-                    )
-                else:
-                    cmd = ["sbatch", os.path.join("scripts", pipeline_script), str(e), str(a), str(counter)]
-                    rc, out, err = run_sbatch(cmd, cwd=proc_dir, dry_run=dry)
+            if use_rest:
+                # Minimal wrapper: the pipeline script already lives on the
+                # shared filesystem and is accessible from the cluster nodes.
+                wrapper = (
+                    f"#!/bin/bash\n"
+                    f"bash {shlex.quote(script_path)} {e} {cumulative} {ctr}\n"
+                )
+                rc, out, err = submit_job_via_rest_api(
+                    wrapper, proc_dir, token, dry_run=dry
+                )
+            else:
+                cmd = ["sbatch", os.path.join("scripts", pipeline_script), str(e), str(cumulative), str(ctr)]
+                rc, out, err = run_sbatch(cmd, cwd=proc_dir, dry_run=dry)
 
-                if dry:
-                    self._log(out)
-                elif rc in (0, 200):
-                    self._log(f"Submitted job {submitted}/{total}: {out.strip()}")
-                else:
-                    self._log(f"Submission failed (rc={rc}): {err or out}")
+            if dry:
+                self._log(out)
+            elif rc in (0, 200):
+                self._log(f"Submitted job {submitted}/{total}: {out.strip()}")
+            else:
+                self._log(f"Submission failed (rc={rc}): {err or out}")
 
         if hasattr(mw, "set_status"):
             mw.set_status("Done.", total, total)
