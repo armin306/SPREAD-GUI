@@ -31,7 +31,7 @@ from PyQt6.QtWidgets import (
 from spread_gui.core.model import Cell
 from spread_gui.core.paths import VISIT_RE, detect_visit_from_path, infer_visit_root
 from spread_gui.core.cryst import normalize_sg_name
-from spread_gui.core.energies import compute_energy_list, detect_energies_in_dir, detect_sweeps_for_energy, detect_wedge_size_in_dir
+from spread_gui.core.energies import compute_energy_list, detect_energies_in_dir, detect_num_sweeps_in_dir, detect_sweeps_for_energy, detect_wedge_size_in_dir
 from spread_gui.core.wedges import compute_wedges
 
 from spread_gui.services.database import ProjectDB
@@ -50,11 +50,11 @@ _CONFIG_PATH = Path.home() / ".config" / "spread_gui" / "settings.ini"
 class _DataScanWorker(QThread):
     """Scans the data directory for energies and wedge size off the main thread."""
     energies_found = pyqtSignal(list)          # List[int]
-    wedge_found    = pyqtSignal(int, int)       # wedge_size, total_images
+    wedge_found    = pyqtSignal(int, int, int, str)  # wedge_size, total_images_per_sweep, num_sweeps, diag
 
     def __init__(self, data_dir: str, scan_energies: bool, scan_wedges: bool) -> None:
         super().__init__()
-        self._data_dir     = data_dir
+        self._data_dir      = data_dir
         self._scan_energies = scan_energies
         self._scan_wedges   = scan_wedges
 
@@ -65,15 +65,17 @@ class _DataScanWorker(QThread):
 
         if self._scan_wedges:
             import glob as _glob
-            wedge = detect_wedge_size_in_dir(self._data_dir)
+            wedge, diag = detect_wedge_size_in_dir(self._data_dir)
             total = 0
+            num_sweeps = 1
             if wedge > 0:
                 energies_found = detect_energies_in_dir(self._data_dir)
                 if energies_found:
                     e0 = energies_found[0]
                     pat = os.path.join(self._data_dir, f"{e0}_E1_1_?????.cbf")
                     total = len(_glob.glob(pat))
-            self.wedge_found.emit(wedge, total)
+                num_sweeps = detect_num_sweeps_in_dir(self._data_dir)
+            self.wedge_found.emit(wedge, total, num_sweeps, diag)
 
 
 class ProcessingTab(QWidget):
@@ -106,6 +108,7 @@ class ProcessingTab(QWidget):
 
         self._last_auto_energies: Optional[List[int]] = None
         self._scan_worker: Optional[_DataScanWorker] = None
+        self._num_sweeps: int = 1
 
         self._build_ui()
         self._wire_signals()
@@ -389,7 +392,10 @@ class ProcessingTab(QWidget):
             except ValueError:
                 self._current_crystal_id = None
 
-        if "data_path" in s: self._data_path = s["data_path"]
+        if "data_path" in s:
+            if s["data_path"] != self._data_path:
+                self._num_sweeps = 1  # reset until next scan
+            self._data_path = s["data_path"]
         if "proc_path" in s: self._proc_path = s["proc_path"]
         if "energy_list" in s:
             self.energy_list_edit.setText(s["energy_list"])
@@ -626,7 +632,7 @@ class ProcessingTab(QWidget):
             lambda energies, d=data_dir: self._on_energies_found(energies, d)
         )
         self._scan_worker.wedge_found.connect(
-            lambda wedge, total, d=data_dir: self._on_wedge_found(wedge, total, d)
+            lambda wedge, total, nsweeps, diag, d=data_dir: self._on_wedge_found(wedge, total, nsweeps, diag, d)
         )
         self._scan_worker.start()
 
@@ -652,18 +658,18 @@ class ProcessingTab(QWidget):
                 self._log(f"Auto-detected energies from {data_dir}: {', '.join(str(e) for e in energies)}")
         self._refresh_previews_and_validation()
 
-    def _on_wedge_found(self, wedge: int, total: int, data_dir: str) -> None:
+    def _on_wedge_found(self, wedge: int, total: int, num_sweeps: int, diag: str, data_dir: str) -> None:
         if data_dir != self._data_path:
             return  # stale result from a previous data dir
         if wedge > 0:
+            self._log(f"Auto-wedge: {diag}, {num_sweeps} sweep(s), {total} frames/sweep")
             if self.wedge_size.value() != wedge:
                 self.wedge_size.setValue(wedge)
-                self._log(f"Auto-detected wedge size: {wedge} images")
             if total > 0 and self.total_images.value() != total:
                 self.total_images.setValue(total)
-                self._log(f"Auto-detected total images per sweep: {total}")
+            self._num_sweeps = num_sweeps
         else:
-            self._log("Auto-wedge: could not determine wedge size from timestamps (data not yet available?)")
+            self._log(f"Auto-wedge: {diag}")
         self._refresh_previews_and_validation()
 
     # ---------------- Validation & previews ----------------
@@ -690,9 +696,17 @@ class ProcessingTab(QWidget):
                 self.energy_preview.setText("Energies: (none / invalid)")
 
         if wedges:
+            total_per_sweep = int(self.total_images.value())
+            all_wedges: List[int] = []
+            for sw in range(self._num_sweeps):
+                all_wedges.extend(sw * total_per_sweep + w for w in wedges)
+            preview_vals = all_wedges[:12]
+            suffix = " …" if len(all_wedges) > 12 else ""
+            sweep_note = f", {self._num_sweeps} sweep(s)" if self._num_sweeps > 1 else ""
             self.wedge_preview.setText(
-                f"list_of_wedges=$(seq {wedges[0]} {wedges[0]} {wedges[-1]}) "
-                f"(preview: {', '.join(map(str, wedges[:12]))}{' …' if len(wedges) > 12 else ''})"
+                f"seq {wedges[0]} {wedges[0]} {wedges[-1]}{sweep_note} → "
+                f"{len(all_wedges)} jobs/energy "
+                f"(preview: {', '.join(map(str, preview_vals))}{suffix})"
             )
         else:
             self.wedge_preview.setText("list_of_wedges: (none / invalid)")

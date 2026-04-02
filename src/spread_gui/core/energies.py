@@ -52,21 +52,19 @@ def detect_sweeps_for_energy(data_dir: str, energy: int, counter: int) -> List[i
     return sorted(sweeps) if sweeps else [0]
 
 
-def detect_wedge_size_in_dir(data_dir: str) -> int:
+def detect_wedge_size_in_dir(data_dir: str):
     """Detect wedge size by finding the first mtime gap >60 s between consecutive
     frames in the primary sweep of the first available energy.
 
-    Returns 0 if detection fails or the data directory is not accessible.
-
-    Algorithm:
-    - Find the first primary sweep (no sweep-number suffix) in data_dir.
-    - Walk frames in order; record mtime of each.
-    - The first consecutive gap >60 s defines the wedge boundary.
-    - Verify consistency: at least one further gap must occur at the same
-      interval (±1 frame), guarding against a one-off network hiccup.
+    Returns (wedge_size, diagnostic_str). wedge_size is 0 on failure.
     """
+    from typing import Tuple as _Tuple
+
+    def fail(msg):
+        return 0, msg
+
     if not data_dir or not os.path.isdir(data_dir):
-        return 0
+        return fail("data_dir not accessible")
 
     # Find any primary sweep first frame: {energy}_E{counter}_1_00001.cbf
     first_pat = re.compile(r"^(\d{4,})_E(\d+)_1_00001\.cbf$", re.IGNORECASE)
@@ -80,11 +78,11 @@ def detect_wedge_size_in_dir(data_dir: str) -> int:
                     first_frame = entry.path
                     energy_str, counter_str = m.group(1), m.group(2)
                     break
-    except OSError:
-        return 0
+    except OSError as exc:
+        return fail(f"scandir error: {exc}")
 
     if not first_frame:
-        return 0
+        return fail("no primary sweep first frame found")
 
     # Collect all frames for this sweep in order
     frame_pat = re.compile(
@@ -99,11 +97,11 @@ def detect_wedge_size_in_dir(data_dir: str) -> int:
                 if m:
                     raw.append((entry.path, int(m.group(1))))
         frames = sorted(raw, key=lambda x: x[1])
-    except OSError:
-        return 0
+    except OSError as exc:
+        return fail(f"frame scan error: {exc}")
 
     if len(frames) < 2:
-        return 0
+        return fail(f"too few frames ({len(frames)}) for {energy_str}_E{counter_str}")
 
     # Gather mtimes
     mtimes: List[float] = []
@@ -115,13 +113,17 @@ def detect_wedge_size_in_dir(data_dir: str) -> int:
 
     # Find first gap >60 s
     wedge_size = 0
+    max_gap = 0.0
     for i in range(1, len(mtimes)):
-        if mtimes[i] - mtimes[i - 1] > 60:
+        gap = mtimes[i] - mtimes[i - 1]
+        if gap > max_gap:
+            max_gap = gap
+        if gap > 60:
             wedge_size = frames[i - 1][1]  # last frame number before gap
             break
 
     if wedge_size == 0:
-        return 0
+        return fail(f"no gap >60 s found in {len(frames)} frames (max gap={max_gap:.1f} s)")
 
     # Consistency check: verify the next expected boundary also has a gap >60 s.
     # The gap is AFTER the last frame of the wedge (frame wedge_size*2), i.e.
@@ -130,10 +132,54 @@ def detect_wedge_size_in_dir(data_dir: str) -> int:
     frame_nums = [f[1] for f in frames]
     if next_boundary in frame_nums:
         idx = frame_nums.index(next_boundary)
-        if idx + 1 < len(mtimes) and mtimes[idx + 1] - mtimes[idx] <= 60:
-            return 0  # No matching gap at second boundary — unreliable
+        if idx + 1 < len(mtimes):
+            gap2 = mtimes[idx + 1] - mtimes[idx]
+            if gap2 <= 60:
+                return fail(
+                    f"wedge={wedge_size} found but consistency check failed: "
+                    f"gap at frame {next_boundary}→{next_boundary+1} is {gap2:.1f} s (expected >60 s)"
+                )
 
-    return wedge_size
+    return wedge_size, f"wedge={wedge_size} frames, {len(frames)} total frames scanned"
+
+
+def detect_num_sweeps_in_dir(data_dir: str) -> int:
+    """Return the number of sweeps for the first energy found in data_dir.
+
+    Counts the primary sweep (no suffix) plus any additional sweeps
+    ({energy}_N_E{counter}_1_00001.cbf). Returns 1 if no additional sweeps
+    are found or if the directory is inaccessible.
+    """
+    if not data_dir or not os.path.isdir(data_dir):
+        return 1
+
+    first_pat = re.compile(r"^(\d{4,})_E(\d+)_1_00001\.cbf$", re.IGNORECASE)
+    energy_str = counter_str = ""
+    try:
+        for entry in sorted(os.scandir(data_dir), key=lambda e: e.name):
+            if entry.is_file():
+                m = first_pat.match(entry.name)
+                if m:
+                    energy_str, counter_str = m.group(1), m.group(2)
+                    break
+    except OSError:
+        return 1
+
+    if not energy_str:
+        return 1
+
+    extra_pat = re.compile(
+        rf"^{re.escape(energy_str)}_\d+_E{re.escape(counter_str)}_1_00001\.cbf$",
+        re.IGNORECASE,
+    )
+    count = 1  # primary sweep
+    try:
+        for entry in os.scandir(data_dir):
+            if entry.is_file() and extra_pat.match(entry.name):
+                count += 1
+    except OSError:
+        pass
+    return count
 
 
 def detect_energies_in_dir(data_dir: str) -> List[int]:
