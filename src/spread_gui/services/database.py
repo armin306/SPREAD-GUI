@@ -305,3 +305,11 @@ class ProjectDB:
                 (crystal_id,),
             ).fetchall()
         return [dict(r) for r in rows]
+
+    def delete_jobs(self, crystal_id: int, pipeline: str) -> None:
+        """Remove all job records for a crystal + pipeline (used before a re-submission)."""
+        with self._tx() as con:
+            con.execute(
+                "DELETE FROM jobs WHERE crystal_id=? AND pipeline=?",
+                (crystal_id, pipeline),
+            )

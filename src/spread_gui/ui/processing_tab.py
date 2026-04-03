@@ -7,6 +7,7 @@ import json
 import os
 import re
 import shlex
+import shutil
 from pathlib import Path
 from typing import List, Optional, Tuple
 
@@ -1077,13 +1078,31 @@ xia2 pipeline=3dii \\
             ans = QMessageBox.question(
                 self,
                 "Processing already exists",
-                f"Output from a previous {pipeline_output_dir} run was found in:\n{proc_dir}\n\n"
-                "Overwrite and re-submit?",
+                f"Output from a previous {pipeline_output_dir} run was found in "
+                f"{len(existing)} director{'y' if len(existing) == 1 else 'ies'}:\n{proc_dir}\n\n"
+                "Delete existing output and re-submit?",
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
                 QMessageBox.StandardButton.Cancel,
             )
             if ans != QMessageBox.StandardButton.Yes:
                 return
+
+            # Remove existing pipeline output directories.
+            errors = []
+            for d in existing:
+                try:
+                    shutil.rmtree(d)
+                    self._log(f"Deleted: {d}")
+                except Exception as exc:
+                    errors.append(f"{d}: {exc}")
+            if errors:
+                self._warn("Deletion failed", "\n".join(errors))
+                return
+
+            # Clear old job records for this crystal + pipeline from the DB.
+            if self._current_crystal_id is not None:
+                self._db.delete_jobs(self._current_crystal_id, self._pipeline_key())
+                self.jobs_status_changed.emit()
 
         self.generate_scripts()
 
