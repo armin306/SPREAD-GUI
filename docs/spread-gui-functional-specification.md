@@ -49,9 +49,10 @@ The SPREAD GUI is a PyQt6 desktop application that provides a structured interfa
 
 - Organise data collections into projects and crystals with a persistent SQLite database
 - Define processing parameters (energies, wedges, pipeline, paths)
-- Generate SLURM-compatible job scripts
-- Optionally submit jobs to the Diamond compute cluster via REST API or `sbatch`
-- Analyse xia2 output across energy points and generate an HTML report with plots
+- Generate SLURM-compatible job scripts for the selected pipeline only
+- Submit jobs to the Diamond compute cluster via REST API, or generate scripts for manual submission on Wilson
+- Track submitted jobs and monitor completion via filesystem polling
+- Analyse xia2 and autoPROC output across energy points and generate an HTML report with plots
 
 The application is designed for interactive use on Diamond Linux workstations and via remote NX sessions.
 
@@ -65,14 +66,18 @@ The application is designed for interactive use on Diamond Linux workstations an
 
 ### 5.2 Major Components
 
-| Component              | Responsibility                                                  |
-|------------------------|-----------------------------------------------------------------|
-| `MainWindow`           | Application shell, header bar, tab container, status bar        |
-| `ProcessingTab`        | Energy/wedge/pipeline configuration, script generation, submission |
-| `AnalysisTab`          | xia2 result parsing and HTML report generation                  |
-| `ManageProjectsDialog` | Two-pane project/crystal browser; crystal creation and deletion |
-| `SgCellDialog`         | Space group and unit cell definition (three input methods)      |
-| `ProjectDB`            | SQLite-backed persistence for projects, crystals, and settings  |
+| Component              | Responsibility                                                                    |
+|------------------------|-----------------------------------------------------------------------------------|
+| `MainWindow`           | Application shell, header bar, tab container, status bar, job polling timer       |
+| `ProcessingTab`        | Energy/wedge/pipeline configuration, script generation, submission                |
+| `AnalysisTab`          | xia2 and autoPROC result parsing and HTML report generation                       |
+| `ManageProjectsDialog` | Two-pane project/crystal browser; crystal creation and deletion                   |
+| `SgCellDialog`         | Space group and unit cell definition (three input methods)                        |
+| `ProjectDB`            | SQLite-backed persistence for projects, crystals, settings, and submitted jobs    |
+| `xia2_parser`          | Parse xia2.txt statistics tables                                                  |
+| `xia2_analysis`        | Scan results, generate plots and HTML report for xia2                             |
+| `autoproc_parser`      | Parse aP.log STARANISO summary block                                              |
+| `autoproc_analysis`    | Scan results, generate plots and HTML report for autoPROC                         |
 
 ### 5.3 Layout
 
@@ -92,13 +97,20 @@ Schema:
 
 ```
 projects  (id, name, created_at)
+
 crystals  (id, project_id, name, visit, data_path, proc_path,
            settings TEXT,   -- JSON blob of all form fields
            created_at, updated_at)
+
+jobs      (id, crystal_id, slurm_job_id, pipeline, proc_dir, output_dir,
+           energy_ev, cumulative, dry_run, status, submitted_at, updated_at)
 ```
 
-- Crystals are deleted automatically when their parent project is deleted (`ON DELETE CASCADE`).
+- Crystals are deleted automatically when their parent project is deleted (`ON DELETE CASCADE`); jobs cascade from crystals.
 - The `settings` JSON uses the same key names as `settings.ini` so either source can populate the form without conversion.
+- `jobs.output_dir` stores the path of the pipeline output directory **relative to `proc_dir`** (e.g. `7118eV/300img/xia2-dials`). This allows a future cleanup feature to identify and selectively delete output files per job and pipeline without ambiguity.
+- `jobs.status` is one of `submitted`, `completed`, or `failed`. The filesystem poller updates this to `completed` when the output directory appears on disk.
+- Dry-run submissions are recorded with `dry_run=1` and are excluded from the tab indicator.
 
 ### 6.2 INI Settings File
 
@@ -215,12 +227,23 @@ The derived wedge list is previewed in the UI.
 
 ### 9.4 Submission Method
 
-| Option                          | Behaviour                                           |
-|---------------------------------|-----------------------------------------------------|
-| REST API (recommended)          | SSH to `wilson`, obtain SLURM JWT, POST to DLS REST API |
-| sbatch (fallback)               | Run `sbatch` locally (requires Wilson shell access) |
+| Option                          | Behaviour                                                                         |
+|---------------------------------|-----------------------------------------------------------------------------------|
+| REST API (recommended)          | SSH to `wilson`, obtain SLURM JWT, POST each job to DLS SLURM REST API           |
+| Dry run — generate scripts only | Write scripts to disk; log instructions for manual submission on Wilson           |
 
-**Dry run** checkbox (default ON) — logs the commands that would be submitted without actually submitting.
+**Dry run** generates the driver and selected pipeline script, then logs the following instructions to the log panel:
+
+```
+Dry run — scripts generated, nothing submitted.
+Scripts are in: {proc_path}/scripts
+
+To submit manually, open a terminal on Wilson and run:
+  cd {proc_path}
+  bash scripts/run_spread_submit.sh
+
+This will submit N job(s) via sbatch.
+```
 
 ### 9.5 SSH Key Status
 
@@ -236,15 +259,15 @@ All SSH calls use `-o StrictHostKeyChecking=accept-new` to silently accept host 
 
 ### 10.1 Generated Files
 
-Files are written into subdirectories of the crystal's processing path:
+Only the driver script and the **selected pipeline's** job script are written. Files are placed under the crystal's processing path:
 
 ```
 {proc_path}/
   scripts/
     run_spread_submit.sh    Driver: iterates energies × wedges, calls pipeline script
-    autoproc_jobs.sh        AutoProc SLURM job template
-    xia2_dials_jobs.sh      Xia2 DIALS SLURM job template
-    xia2_3dii_jobs.sh       Xia2 3dii SLURM job template
+    autoproc_jobs.sh   \
+    xia2_dials_jobs.sh  |  One of these, depending on the selected pipeline
+    xia2_3dii_jobs.sh  /
   files/                    Reference files (PDBs fetched from RCSB, CIFs, etc.)
 ```
 
@@ -272,15 +295,52 @@ When a data directory contains multiple sweeps for the same energy (e.g. `7118_E
 
 ## 11. Job Submission
 
-1. If `scripts/run_spread_submit.sh` already exists, a confirmation dialog asks whether to overwrite and re-submit.
-2. Scripts are generated (as above).
-3. For REST API mode: SSH to `wilson` (interactive password prompt allowed) to retrieve a short-lived SLURM JWT token via `scontrol token`.
-4. The GUI scans the data directory to discover all sweeps per energy (`detect_sweeps_for_energy`). For each energy × sweep × wedge combination, a job is submitted with the cumulative image count.
-5. For each job, a minimal wrapper script is POSTed to the DLS SLURM REST endpoint (`https://slurm-rest.diamond.ac.uk:8443/slurm/v0.0.40/job/submit`), or `sbatch` is called directly in fallback mode.
-6. Progress is reported in the status bar: `submitted / total`.
-7. Each submission result is logged.
+### 11.1 Overwrite Check
+
+Before generating scripts, the GUI checks whether any pipeline output directories already exist matching `{proc_path}/*eV/*img/{pipeline_output_dir}/` (e.g. `xia2-dials`, `autoPROC`). If found, a confirmation dialog reports the number of existing directories and asks whether to delete them and re-submit. On confirmation:
+
+- All matching output directories are removed via `shutil.rmtree`.
+- The corresponding job records for that crystal and pipeline are deleted from the database.
+- The tab indicator is reset.
+
+If any deletion fails the process is aborted and an error is shown.
+
+### 11.2 Script Generation
+
+Scripts are generated for the selected pipeline only (see Section 10).
+
+### 11.3 REST API Submission
+
+1. SSH to `wilson` (interactive password prompt allowed) to retrieve a short-lived SLURM JWT token via `scontrol token lifespan=300`.
+2. The GUI scans the data directory to discover all sweeps per energy. For each energy × sweep × wedge combination a job is built (cumulative image count).
+3. For each job, a minimal wrapper script is POSTed to the DLS SLURM REST endpoint (`https://slurm-rest.diamond.ac.uk:8443/slurm/v0.0.40/job/submit`).
+4. Successful submissions are recorded in the `jobs` table (including the SLURM job ID parsed from the REST response).
+5. Progress is reported in the status bar; each result is logged.
+6. After all submissions the `jobs_status_changed` signal is emitted and the tab indicator is updated.
 
 If `requests` is not available, `urllib` is used as a fallback.
+
+### 11.4 Dry Run
+
+Scripts are generated and the user is shown instructions for manual submission on Wilson (see Section 9.4). No network calls are made and no jobs are recorded in the database.
+
+### 11.5 Tab Indicator
+
+A coloured dot is shown on the Processing tab label to reflect submission state for the currently loaded crystal:
+
+| Dot colour | Meaning                                                              |
+|------------|----------------------------------------------------------------------|
+| *(none)*   | No real (non-dry-run) jobs recorded for this crystal                 |
+| Yellow     | ≥1 job submitted; not all pipeline output directories exist yet      |
+| Green      | All recorded job output directories are present on the filesystem    |
+
+The indicator is evaluated on startup, on crystal load, after each submission, and every 60 seconds by a background filesystem poll.
+
+### 11.6 Job Monitoring (Filesystem Polling)
+
+A `QTimer` fires every 60 seconds. For each job with `status = 'submitted'`, the GUI checks whether `{proc_dir}/{output_dir}` exists on the filesystem. If so, the job status is updated to `completed` in the database and the tab indicator is refreshed.
+
+This provides passive completion detection without requiring SLURM API access. Full SLURM state polling (PENDING / RUNNING / COMPLETED / FAILED via the REST API) is planned once DLS REST authentication is resolved.
 
 ---
 
@@ -288,44 +348,84 @@ If `requests` is not available, `urllib` is used as a fallback.
 
 ### 12.1 Input
 
-- **Processing path**: directory containing `{energy}eV` subdirectories (as written by the processing scripts).
-- **Pipeline**: xia2-dials or xia2-3dii.
-
-The processing path is pre-populated from the shared `settings.ini`.
+- **Processing path**: directory containing `{energy}eV` subdirectories (as written by the processing scripts). Pre-populated from the shared `settings.ini`.
+- **Pipeline**: xia2-dials, xia2-3dii, or autoPROC. Pre-selected to match the pipeline setting from the Processing tab.
 
 ### 12.2 xia2 Output Parsing
 
 For each `{energy}eV/{images}img/{pipeline}/xia2.txt` file found:
 
 - The statistics table is located and parsed.
-- Values are extracted for overall, low-resolution shell, and high-resolution shell.
-- Fields extracted: high-resolution limit, completeness, multiplicity, I/σ(I), R-merge, R-pim, CC½, anomalous completeness, anomalous multiplicity, anomalous slope, Wilson B-factor.
-- Unit cell parameters (a, b, c, α, β, γ) are parsed from the header (standard-uncertainty notation stripped before parsing).
+- Values extracted for overall, low-resolution shell, and high-resolution shell: high-resolution limit, completeness, multiplicity, I/σ(I), Rmerge(I+/I−), Rpim, CC½, anomalous completeness, anomalous multiplicity, anomalous slope, Wilson B-factor.
+- Unit cell parameters (a, b, c, α, β, γ) parsed from the header; standard-uncertainty suffixes (e.g. `89.2764(4)`) stripped before parsing.
 
-A run with no statistics table (failed xia2) is recorded as absent and shown as a red cross (✗) in the report.
+A run with no statistics table (failed or incomplete xia2) is recorded as absent and shown as a red cross (✗) in the report.
 
-### 12.3 Report Generation
+### 12.3 autoPROC Output Parsing
+
+For each `{energy}eV/{images}img/aP.log` file found:
+
+- ANSI escape codes are stripped.
+- The **third and final statistics block** is located — identified by the phrase *"statistics below are for all observations up to the maximum resolution as determined by STARANISO"*. This block uses the ellipsoidal STARANISO cut-off and is the recommended output.
+- Values extracted for overall, inner shell, and outer shell: high-resolution limit, completeness (spherical and ellipsoidal), multiplicity, I/σ(I), Rmerge/Rmeas/Rpim (all I+&I−), CC½, anomalous completeness (spherical and ellipsoidal), anomalous multiplicity, CC(ano), |DANO|/σ(DANO).
+- The **diffraction limits along the three principal axes of the STARANISO ellipsoid** are extracted from the `Diffraction limits & principal axes` section. The three values are labelled a*, b*, c* by position (first, second, third line) regardless of the actual reciprocal-space direction.
+- Cell parameters, space group, and wavelength are extracted from the last occurrence of the corresponding output lines.
+
+A run where the STARANISO block is absent (failed or still-running job) is recorded as `None` and shown as ✗ in the report.
+
+### 12.4 Report Generation
 
 Output is written to `{processing_path}/results/{pipeline}/` (default) or a user-chosen directory.
 
 If the default output directory already exists, a dialog offers three options:
 
-| Option              | Behaviour                                                  |
-|---------------------|------------------------------------------------------------|
-| Show existing results | Opens `index.html` in the default browser; no re-run    |
-| Re-run and overwrite | Confirms, then re-runs into the same directory           |
-| Re-run in new directory | Prompts for a subdirectory name under `results/`      |
+| Option                  | Behaviour                                                  |
+|-------------------------|------------------------------------------------------------|
+| Show existing results   | Opens `index.html` in the default browser; no re-run       |
+| Re-run and overwrite    | Confirms, then re-runs into the same directory             |
+| Re-run in new directory | Prompts for a subdirectory name under `results/`           |
 
-**Generated artefacts**: one PNG per metric (11 total), plus `index.html`.
+**Generated artefacts**: PNG plots plus `index.html`.
 
 The HTML report contains:
-- A colour-coded status table (green ✓ / red ✗ per energy/wedge combination)
-- Navigation links to each plot
-- Embedded plots as `<img>` tags
+- A colour-coded status table (green ✓ / red ✗ per energy/wedge combination). Each cell links to the pipeline's own HTML summary (`xia2.html` or `autoPROC/summary.html`) when the file exists, opening in a new browser tab.
+- Navigation links to each plot.
+- Embedded plots as `<img>` tags.
 
 All plots show wedge size on the x-axis. Multi-shell metrics (overall / low / high) are shown as three-panel figures.
 
-Report generation runs in a `QThread` to keep the GUI responsive. Progress messages are emitted as signals and appended to the log panel.
+**Plots generated for xia2** (11 total):
+
+| Plot                    | Metric                                    |
+|-------------------------|-------------------------------------------|
+| High resolution limit   | Overall                                   |
+| Completeness            | Overall                                   |
+| Multiplicity            | Overall                                   |
+| I/σ(I)                  | Overall / Low / High shell                |
+| Rmerge(I+/I−)           | Overall / Low / High shell                |
+| CC½                     | Overall / Low / High shell                |
+| Wilson B factor         | Scalar                                    |
+| Anomalous completeness  | Overall / Low / High shell                |
+| Anomalous multiplicity  | Overall / Low / High shell                |
+| Anomalous slope         | Scalar                                    |
+| Unit cell parameters    | 2×3 grid: a, b, c, α, β, γ              |
+
+**Plots generated for autoPROC** (10 total, using ellipsoidal statistics throughout):
+
+| Plot                              | Metric                                    |
+|-----------------------------------|-------------------------------------------|
+| High resolution limit (STARANISO) | Overall                                   |
+| Completeness (ellipsoidal)        | Overall                                   |
+| Multiplicity                      | Overall                                   |
+| I/σ(I)                            | Overall / Low / High shell                |
+| Rmerge (all I+&I−)                | Overall / Low / High shell                |
+| CC½                               | Overall / Low / High shell                |
+| Anomalous completeness (ellipsoidal) | Overall / Low / High shell             |
+| Anomalous multiplicity            | Overall / Low / High shell                |
+| Unit cell parameters              | 2×3 grid: a, b, c, α, β, γ              |
+| **Diffraction limits (STARANISO)**| 3 panels: a*, b*, c* principal axes      |
+
+Report generation runs in a `QThread` to keep the GUI responsive. Progress messages are appended to the log panel.
 
 ---
 
@@ -362,6 +462,7 @@ Report generation runs in a `QThread` to keep the GUI responsive. Progress messa
 
 | Date       | Change                                                                                   |
 |------------|------------------------------------------------------------------------------------------|
+| April 2026 | Job tracking: `jobs` table in DB; tab indicator (yellow/green dot); 60 s filesystem polling for completion detection. autoPROC output parsing from `aP.log` STARANISO block; autoPROC analysis with diffraction-limits plot. Submission simplified: dry-run radio replaces checkbox and sbatch option; only selected pipeline script generated. Run-status table cells link to pipeline HTML summaries. Overwrite deletes existing output dirs and clears DB records before re-submitting. |
 | April 2026 | Multi-sweep support: cumulative wedge directories, per-sweep image ranges, automatic sweep discovery at runtime; wedge auto-detection from CBF timestamps (background thread); scripts and files moved to `scripts/` and `files/` subdirectories; PDB saving restored |
 | April 2026 | Full rewrite: project/crystal DB, Manage Projects dialog, SgCellDialog, Analysis tab, header bar, REST API submission, removal of path fields from Processing tab |
 | March 2026 | Initial specification aligned with DLS software documentation conventions                |

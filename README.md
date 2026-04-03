@@ -1,6 +1,6 @@
 # SPREAD-GUI
 
-A PyQt6 desktop application for managing and submitting wavelength-interleaved SPREAD data-collection processing jobs on the I23 beamline at Diamond Light Source, and for analysing the resulting xia2 output.
+A PyQt6 desktop application for managing and submitting wavelength-interleaved SPREAD data-collection processing jobs on the I23 beamline at Diamond Light Source, and for analysing the resulting xia2 and autoPROC output.
 
 ## Quick start
 
