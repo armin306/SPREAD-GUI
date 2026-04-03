@@ -6,7 +6,7 @@ import stat
 import shlex
 import subprocess
 from pathlib import Path
-from typing import List, Tuple
+from typing import Tuple
 
 try:
     import requests as _requests  # type: ignore
@@ -24,14 +24,6 @@ def chmod_x(path: str) -> None:
     except Exception as e:
         raise RuntimeError(f"Could not make {path} executable: {e}") from e
 
-
-def run_sbatch(cmd: List[str], cwd: str, dry_run: bool) -> Tuple[int, str, str]:
-    if dry_run:
-        return 0, "[DRY] " + " ".join(shlex.quote(x) for x in cmd), ""
-    p = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True)
-    out = (p.stdout or "").strip()
-    err = (p.stderr or "").strip()
-    return p.returncode, out, err
 
 
 def check_ssh_key_auth(gateway: str = _SLURM_GATEWAY) -> tuple[bool, str]:

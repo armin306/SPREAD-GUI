@@ -41,7 +41,6 @@ from spread_gui.core.wedges import compute_wedges
 from spread_gui.services.database import ProjectDB
 from spread_gui.services.slurm import (
     chmod_x,
-    run_sbatch,
     get_slurm_jwt,
     submit_job_via_rest_api,
     check_ssh_key_auth,
@@ -252,10 +251,10 @@ class ProcessingTab(QWidget):
 
         sub_row = QHBoxLayout()
         self.rb_submit_rest = QRadioButton("REST API (recommended)")
-        self.rb_submit_sbatch = QRadioButton("sbatch (run on Wilson as fallback)")
+        self.rb_submit_dry  = QRadioButton("Dry run — generate scripts only")
         self.rb_submit_rest.setChecked(True)
         sub_row.addWidget(self.rb_submit_rest)
-        sub_row.addWidget(self.rb_submit_sbatch)
+        sub_row.addWidget(self.rb_submit_dry)
         sub_row.addStretch(1)
         sub_vbox.addLayout(sub_row)
 
@@ -272,13 +271,8 @@ class ProcessingTab(QWidget):
 
         # Actions
         a_row = QHBoxLayout()
-        self.btn_generate = QPushButton("Generate scripts")
         self.btn_submit = QPushButton("Submit jobs")
-        self.chk_dry_run = QCheckBox("Dry run (don't submit)")
-        self.chk_dry_run.setChecked(True)
-        a_row.addWidget(self.btn_generate)
         a_row.addWidget(self.btn_submit)
-        a_row.addWidget(self.chk_dry_run)
         a_row.addStretch(1)
         root.addLayout(a_row)
 
@@ -325,10 +319,8 @@ class ProcessingTab(QWidget):
         self.rb_xia2_dials.toggled.connect(self._schedule_autosave)
         self.rb_xia2_3dii.toggled.connect(self._schedule_autosave)
         self.rb_submit_rest.toggled.connect(self._schedule_autosave)
-        self.rb_submit_sbatch.toggled.connect(self._schedule_autosave)
-        self.chk_dry_run.toggled.connect(self._schedule_autosave)
+        self.rb_submit_dry.toggled.connect(self._schedule_autosave)
 
-        self.btn_generate.clicked.connect(self.generate_scripts)
         self.btn_submit.clicked.connect(self.submit_jobs)
         self.btn_save_log.clicked.connect(self._save_log)
         self.btn_setup_ssh_key.clicked.connect(self._setup_ssh_key)
@@ -374,8 +366,7 @@ class ProcessingTab(QWidget):
             "cell_beta":     str(cell.beta)  if cell else "0",
             "cell_gamma":    str(cell.gamma) if cell else "0",
             "pipeline":      self._pipeline_key(),
-            "submit_method": "rest" if self.rb_submit_rest.isChecked() else "sbatch",
-            "dry_run":       str(self.chk_dry_run.isChecked()),
+            "submit_method": "rest" if self.rb_submit_rest.isChecked() else "dry",
             "energy_mode":   "range" if self.rb_energy_range.isChecked() else "list",
             "energy_start":  str(self.energy_start.value()),
             "energy_end":    str(self.energy_end.value()),
@@ -428,13 +419,10 @@ class ProcessingTab(QWidget):
             self.rb_autoproc.setChecked(True)
 
         submit_method = s.get("submit_method", "")
-        if submit_method == "sbatch":
-            self.rb_submit_sbatch.setChecked(True)
+        if submit_method == "dry":
+            self.rb_submit_dry.setChecked(True)
         elif submit_method == "rest":
             self.rb_submit_rest.setChecked(True)
-
-        if "dry_run" in s:
-            self.chk_dry_run.setChecked(s["dry_run"].lower() == "true")
 
         energy_mode = s.get("energy_mode", "")
         if energy_mode == "list":
@@ -726,17 +714,21 @@ class ProcessingTab(QWidget):
         return "autoproc"
 
     # ---------------- Script generation ----------------
-    def _script_paths(self) -> Tuple[str, str, str, str]:
+    def _script_paths(self) -> Tuple[str, str]:
+        """Return (driver_script_path, pipeline_job_script_path) for the selected pipeline."""
         proc_dir = self._proc_path or os.getcwd()
         scripts_dir = os.path.join(proc_dir, "scripts")
         files_dir = os.path.join(proc_dir, "files")
         os.makedirs(scripts_dir, exist_ok=True)
         os.makedirs(files_dir, exist_ok=True)
         submit_script = os.path.join(scripts_dir, "run_spread_submit.sh")
-        ap = os.path.join(scripts_dir, "autoproc_jobs.sh")
-        dials = os.path.join(scripts_dir, "xia2_dials_jobs.sh")
-        d3 = os.path.join(scripts_dir, "xia2_3dii_jobs.sh")
-        return submit_script, ap, dials, d3
+        pipeline_filename = {
+            "autoproc":   "autoproc_jobs.sh",
+            "xia2_dials": "xia2_dials_jobs.sh",
+            "xia2_3dii":  "xia2_3dii_jobs.sh",
+        }[self._pipeline_key()]
+        pipeline_script = os.path.join(scripts_dir, pipeline_filename)
+        return submit_script, pipeline_script
 
     def _validate_before_generate(self) -> Tuple[List[int], List[int]]:
         visit = self._visit.strip()
@@ -1005,44 +997,37 @@ xia2 pipeline=3dii \\
         project = self._project.strip() or "PROJECT"
         crystal = self._crystal.strip() or "CRYSTAL"
 
-        submit_script, ap, dials, d3 = self._script_paths()
-
         pipeline = self._pipeline_key()
-        pipeline_script = {
-            "autoproc": "autoproc_jobs.sh",
+        total_images = int(self.total_images.value())
+
+        pipeline_script_name = {
+            "autoproc":   "autoproc_jobs.sh",
             "xia2_dials": "xia2_dials_jobs.sh",
-            "xia2_3dii": "xia2_3dii_jobs.sh",
+            "xia2_3dii":  "xia2_3dii_jobs.sh",
+        }[pipeline]
+        pipeline_content = {
+            "autoproc":   self._make_autoproc_job(data_dir, cell, sg, total_images),
+            "xia2_dials": self._make_xia2_dials_job(data_dir, cell, sg, project, crystal, total_images),
+            "xia2_3dii":  self._make_xia2_3dii_job(data_dir, cell, sg, project, crystal, total_images),
         }[pipeline]
 
-        total_images = int(self.total_images.value())
-        driver = self._make_driver_script(energies, wedges, pipeline_script, data_dir, total_images)
-        ap_txt = self._make_autoproc_job(data_dir, cell, sg, total_images)
-        dials_txt = self._make_xia2_dials_job(data_dir, cell, sg, project, crystal, total_images)
-        d3_txt = self._make_xia2_3dii_job(data_dir, cell, sg, project, crystal, total_images)
+        submit_script, pipeline_script = self._script_paths()
+        driver = self._make_driver_script(energies, wedges, pipeline_script_name, data_dir, total_images)
 
         try:
             with open(submit_script, "wt") as f:
                 f.write(driver)
-            with open(ap, "wt") as f:
-                f.write(ap_txt)
-            with open(dials, "wt") as f:
-                f.write(dials_txt)
-            with open(d3, "wt") as f:
-                f.write(d3_txt)
-
+            with open(pipeline_script, "wt") as f:
+                f.write(pipeline_content)
             chmod_x(submit_script)
-            chmod_x(ap)
-            chmod_x(dials)
-            chmod_x(d3)
+            chmod_x(pipeline_script)
         except Exception as e:
             self._warn("Write failed", f"Could not write scripts to:\n{proc_dir}\n\n{e}")
             return
 
         self._log(f"Scripts generated in {proc_dir}")
         self._log(f" - {submit_script}")
-        self._log(f" - {ap}")
-        self._log(f" - {dials}")
-        self._log(f" - {d3}")
+        self._log(f" - {pipeline_script}")
 
     @staticmethod
     def _parse_slurm_job_id(rc: int, out: str, use_rest: bool) -> Optional[int]:
@@ -1114,13 +1099,9 @@ xia2 pipeline=3dii \\
 
         proc_dir = self._proc_path
         pipeline = self._pipeline_key()
-        pipeline_script = {
-            "autoproc": "autoproc_jobs.sh",
-            "xia2_dials": "xia2_dials_jobs.sh",
-            "xia2_3dii": "xia2_3dii_jobs.sh",
-        }[pipeline]
+        dry = self.rb_submit_dry.isChecked()
 
-        script_path = os.path.join(proc_dir, "scripts", pipeline_script)
+        _, script_path = self._script_paths()
         if not os.path.isfile(script_path):
             self._warn("Missing script", f"Job script not found:\n{script_path}")
             return
@@ -1142,27 +1123,40 @@ xia2 pipeline=3dii \\
             self._warn("Nothing to submit", "No jobs to submit.")
             return
 
-        dry = self.chk_dry_run.isChecked()
-        use_rest = self.rb_submit_rest.isChecked()
         mw = self.window()
 
-        # Fetch JWT token once before the loop (REST API path only).
-        token = ""
-        if use_rest and not dry:
+        if dry:
+            # Dry run: scripts are already generated — just tell the user where they are.
+            scripts_dir = os.path.join(proc_dir, "scripts")
+            self._log("")
+            self._log("Dry run — scripts generated, nothing submitted.")
+            self._log(f"Scripts are in: {scripts_dir}")
+            self._log("")
+            self._log("To submit manually, open a terminal on Wilson and run:")
+            self._log(f"  cd {shlex.quote(proc_dir)}")
+            self._log(f"  bash scripts/run_spread_submit.sh")
+            self._log("")
+            self._log(f"This will submit {total} job(s) via sbatch.")
             if hasattr(mw, "set_status"):
-                mw.set_status("Fetching SLURM token…", 0, total)
-            try:
-                token = get_slurm_jwt()
-                self._log("SLURM JWT token acquired.")
-            except Exception as e:
-                self._warn(
-                    "Token error",
-                    f"Could not obtain SLURM JWT via SSH to wilson:\n\n{e}",
-                )
-                return
+                mw.set_status("Dry run — scripts ready.", total, total)
+            self.jobs_status_changed.emit()
+            return
+
+        # REST API submission
+        if hasattr(mw, "set_status"):
+            mw.set_status("Fetching SLURM token…", 0, total)
+        try:
+            token = get_slurm_jwt()
+            self._log("SLURM JWT token acquired.")
+        except Exception as e:
+            self._warn(
+                "Token error",
+                f"Could not obtain SLURM JWT via SSH to wilson:\n\n{e}",
+            )
+            return
 
         if hasattr(mw, "set_status"):
-            mw.set_status(f"{'Dry-run' if dry else 'Submitting'} {total} jobs…", 0, total)
+            mw.set_status(f"Submitting {total} jobs…", 0, total)
 
         crystal_id = self._current_crystal_id
         submitted = 0
@@ -1171,45 +1165,30 @@ xia2 pipeline=3dii \\
             if hasattr(mw, "set_status"):
                 mw.set_status("Submitting jobs…", submitted, total)
 
-            if use_rest:
-                # Minimal wrapper: the pipeline script already lives on the
-                # shared filesystem and is accessible from the cluster nodes.
-                wrapper = (
-                    f"#!/bin/bash\n"
-                    f"bash {shlex.quote(script_path)} {e} {cumulative} {ctr}\n"
-                )
-                rc, out, err = submit_job_via_rest_api(
-                    wrapper, proc_dir, token, dry_run=dry
-                )
-            else:
-                cmd = ["sbatch", os.path.join("scripts", pipeline_script), str(e), str(cumulative), str(ctr)]
-                rc, out, err = run_sbatch(cmd, cwd=proc_dir, dry_run=dry)
+            wrapper = (
+                f"#!/bin/bash\n"
+                f"bash {shlex.quote(script_path)} {e} {cumulative} {ctr}\n"
+            )
+            rc, out, err = submit_job_via_rest_api(wrapper, proc_dir, token)
 
-            success = dry or rc in (0, 200)
-            if dry:
-                self._log(out)
-            elif success:
+            if rc in (0, 200):
                 self._log(f"Submitted job {submitted}/{total}: {out.strip()}")
             else:
                 self._log(f"Submission failed (rc={rc}): {err or out}")
 
-            # Record in DB (skip if no crystal is loaded)
-            if crystal_id is not None and success:
-                slurm_id = self._parse_slurm_job_id(rc, out, use_rest)
+            if crystal_id is not None and rc in (0, 200):
+                slurm_id = self._parse_slurm_job_id(rc, out, use_rest=True)
                 self._db.add_job(
                     crystal_id=crystal_id,
                     pipeline=pipeline,
                     proc_dir=proc_dir,
                     energy_ev=e,
                     cumulative=cumulative,
-                    dry_run=dry,
+                    dry_run=False,
                     slurm_job_id=slurm_id,
                 )
 
         if hasattr(mw, "set_status"):
             mw.set_status("Done.", total, total)
-        self._info(
-            "Submission complete",
-            f"{'Dry run complete' if dry else 'Submission complete'}.\nJobs: {total}",
-        )
+        self._info("Submission complete", f"Submitted {total} job(s).")
         self.jobs_status_changed.emit()
