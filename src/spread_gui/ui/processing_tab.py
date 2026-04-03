@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import configparser
 import datetime
+import glob
+import json
 import os
+import re
 import shlex
 from pathlib import Path
 from typing import List, Optional, Tuple
@@ -83,6 +86,8 @@ class ProcessingTab(QWidget):
     crystal_context_changed = pyqtSignal(str, str)
     # Emitted after any save: (data_path, proc_path, space_group, cell_str).
     processing_info_changed = pyqtSignal(str, str, str, str)
+    # Emitted after jobs are submitted so the tab indicator can be updated.
+    jobs_status_changed = pyqtSignal()
 
     def __init__(self, db: ProjectDB, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -1037,7 +1042,22 @@ xia2 pipeline=3dii \\
         self._log(f" - {ap}")
         self._log(f" - {dials}")
         self._log(f" - {d3}")
-        self._info("Scripts generated", f"Generated scripts in:\n{proc_dir}")
+
+    @staticmethod
+    def _parse_slurm_job_id(rc: int, out: str, use_rest: bool) -> Optional[int]:
+        """Extract the SLURM job id from a submission response, or return None."""
+        try:
+            if use_rest and rc == 200:
+                data = json.loads(out)
+                return int(data.get("job_id") or data.get("jobId") or 0) or None
+            elif not use_rest:
+                # sbatch prints "Submitted batch job 12345"
+                m = re.search(r"Submitted batch job (\d+)", out)
+                if m:
+                    return int(m.group(1))
+        except Exception:
+            pass
+        return None
 
     def submit_jobs(self) -> None:
         try:
@@ -1047,12 +1067,17 @@ xia2 pipeline=3dii \\
             return
 
         proc_dir = self._proc_path
-        submit_script_path = os.path.join(proc_dir, "scripts", "run_spread_submit.sh")
-        if os.path.isfile(submit_script_path):
+        pipeline_output_dir = {
+            "autoproc":   "autoPROC",
+            "xia2_dials": "xia2-dials",
+            "xia2_3dii":  "xia2-3dii",
+        }[self._pipeline_key()]
+        existing = glob.glob(os.path.join(proc_dir, "*eV", "*img", pipeline_output_dir))
+        if existing:
             ans = QMessageBox.question(
                 self,
                 "Processing already exists",
-                f"A previous submission was found in:\n{proc_dir}\n\n"
+                f"Output from a previous {pipeline_output_dir} run was found in:\n{proc_dir}\n\n"
                 "Overwrite and re-submit?",
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
                 QMessageBox.StandardButton.Cancel,
@@ -1120,6 +1145,7 @@ xia2 pipeline=3dii \\
         if hasattr(mw, "set_status"):
             mw.set_status(f"{'Dry-run' if dry else 'Submitting'} {total} jobs…", 0, total)
 
+        crystal_id = self._current_crystal_id
         submitted = 0
         for e, cumulative, ctr in jobs:
             submitted += 1
@@ -1140,12 +1166,26 @@ xia2 pipeline=3dii \\
                 cmd = ["sbatch", os.path.join("scripts", pipeline_script), str(e), str(cumulative), str(ctr)]
                 rc, out, err = run_sbatch(cmd, cwd=proc_dir, dry_run=dry)
 
+            success = dry or rc in (0, 200)
             if dry:
                 self._log(out)
-            elif rc in (0, 200):
+            elif success:
                 self._log(f"Submitted job {submitted}/{total}: {out.strip()}")
             else:
                 self._log(f"Submission failed (rc={rc}): {err or out}")
+
+            # Record in DB (skip if no crystal is loaded)
+            if crystal_id is not None and success:
+                slurm_id = self._parse_slurm_job_id(rc, out, use_rest)
+                self._db.add_job(
+                    crystal_id=crystal_id,
+                    pipeline=pipeline,
+                    proc_dir=proc_dir,
+                    energy_ev=e,
+                    cumulative=cumulative,
+                    dry_run=dry,
+                    slurm_job_id=slurm_id,
+                )
 
         if hasattr(mw, "set_status"):
             mw.set_status("Done.", total, total)
@@ -1153,3 +1193,4 @@ xia2 pipeline=3dii \\
             "Submission complete",
             f"{'Dry run complete' if dry else 'Submission complete'}.\nJobs: {total}",
         )
+        self.jobs_status_changed.emit()

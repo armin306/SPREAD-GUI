@@ -87,6 +87,27 @@ CREATE TABLE IF NOT EXISTS crystals (
     updated_at TEXT    NOT NULL,
     UNIQUE(project_id, name)
 );
+
+-- Each row is one SLURM job (one energy × one wedge size).
+-- output_dir is the directory the job writes into, relative to proc_path
+-- (e.g. "7118eV/300img/xia2-dials").  Stored here so a future cleanup
+-- feature can enumerate exactly which directories belong to each job and
+-- pipeline, and delete them selectively.
+CREATE TABLE IF NOT EXISTS jobs (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    crystal_id    INTEGER NOT NULL REFERENCES crystals(id) ON DELETE CASCADE,
+    slurm_job_id  INTEGER,              -- NULL for dry runs or when not parsed
+    pipeline      TEXT    NOT NULL,     -- autoproc | xia2_dials | xia2_3dii
+    proc_dir      TEXT    NOT NULL,     -- absolute path to proc root
+    output_dir    TEXT    NOT NULL,     -- relative path: <energy>eV/<cumulative>img/<pipeline>
+    energy_ev     INTEGER NOT NULL,
+    cumulative    INTEGER NOT NULL,
+    dry_run       INTEGER NOT NULL DEFAULT 0,  -- 1 if submitted as dry run
+    status        TEXT    NOT NULL DEFAULT 'submitted',
+                                        -- submitted | completed | failed
+    submitted_at  TEXT    NOT NULL,
+    updated_at    TEXT    NOT NULL
+);
 """
 
 
@@ -230,3 +251,57 @@ class ProjectDB:
         if row is None:
             return ("", "")
         return (row["pname"], row["cname"])
+
+    # ---- jobs ----
+
+    def add_job(
+        self,
+        crystal_id: int,
+        pipeline: str,
+        proc_dir: str,
+        energy_ev: int,
+        cumulative: int,
+        dry_run: bool = False,
+        slurm_job_id: Optional[int] = None,
+    ) -> int:
+        """Insert a new job row and return its id."""
+        pipeline_output = {
+            "autoproc":   "autoPROC",
+            "xia2_dials": "xia2-dials",
+            "xia2_3dii":  "xia2-3dii",
+        }.get(pipeline, pipeline)
+        output_dir = f"{energy_ev}eV/{cumulative}img/{pipeline_output}"
+        now = _now()
+        with self._tx() as con:
+            cur = con.execute(
+                "INSERT INTO jobs "
+                "(crystal_id, slurm_job_id, pipeline, proc_dir, output_dir, "
+                " energy_ev, cumulative, dry_run, status, submitted_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'submitted', ?, ?)",
+                (crystal_id, slurm_job_id, pipeline, proc_dir, output_dir,
+                 energy_ev, cumulative, int(dry_run), now, now),
+            )
+            return cur.lastrowid
+
+    def update_job_slurm_id(self, job_id: int, slurm_job_id: int) -> None:
+        with self._tx() as con:
+            con.execute(
+                "UPDATE jobs SET slurm_job_id=?, updated_at=? WHERE id=?",
+                (slurm_job_id, _now(), job_id),
+            )
+
+    def update_job_status(self, job_id: int, status: str) -> None:
+        with self._tx() as con:
+            con.execute(
+                "UPDATE jobs SET status=?, updated_at=? WHERE id=?",
+                (status, _now(), job_id),
+            )
+
+    def get_jobs(self, crystal_id: int) -> list[dict]:
+        """Return all jobs for a crystal, newest first."""
+        with self._connect() as con:
+            rows = con.execute(
+                "SELECT * FROM jobs WHERE crystal_id=? ORDER BY submitted_at DESC",
+                (crystal_id,),
+            ).fetchall()
+        return [dict(r) for r in rows]

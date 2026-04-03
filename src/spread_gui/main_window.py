@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import glob
+import os
 from pathlib import Path
 
-from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QCloseEvent, QFont
+from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtGui import QCloseEvent, QColor, QFont, QIcon, QPainter, QPixmap
 from PyQt6.QtWidgets import (
     QFrame,
     QGridLayout,
@@ -172,10 +174,14 @@ class MainWindow(QMainWindow):
 
         # ---- Signals ----
         self.proc_tab.crystal_context_changed.connect(self._on_crystal_context_changed)
+        self.proc_tab.crystal_context_changed.connect(
+            lambda _p, _c: self._update_processing_tab_indicator()
+        )
         self.proc_tab.processing_info_changed.connect(self._on_processing_info_changed)
         self.proc_tab.processing_info_changed.connect(
             lambda _d, proc, _sg, _c: self.analysis_tab.set_proc_path(proc)
         )
+        self.proc_tab.jobs_status_changed.connect(self._update_processing_tab_indicator)
 
         # Restore header from the crystal that was active in the previous session.
         cid = self.proc_tab.current_crystal_id
@@ -188,6 +194,13 @@ class MainWindow(QMainWindow):
 
         # Populate the details rows with whatever was loaded from settings.
         self.proc_tab._emit_processing_info()
+        self._update_processing_tab_indicator()
+
+        # Poll the filesystem every 60 s to detect completed jobs.
+        self._poll_timer = QTimer(self)
+        self._poll_timer.setInterval(60_000)
+        self._poll_timer.timeout.connect(self._poll_jobs)
+        self._poll_timer.start()
 
     # ---- Header updates ----
 
@@ -202,6 +215,60 @@ class MainWindow(QMainWindow):
         self._lbl_proc_path.setText(proc_path if proc_path else "\u2014")
         self._lbl_sg.setText(space_group if space_group else "\u2014")
         self._lbl_cell.setText(cell_str if cell_str else "\u2014")
+
+    # ---- Processing tab indicator ----
+
+    @staticmethod
+    def _dot_icon(color: str) -> QIcon:
+        px = QPixmap(14, 14)
+        px.fill(Qt.GlobalColor.transparent)
+        p = QPainter(px)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.setBrush(QColor(color))
+        p.setPen(Qt.PenStyle.NoPen)
+        p.drawEllipse(1, 1, 12, 12)
+        p.end()
+        return QIcon(px)
+
+    def _update_processing_tab_indicator(self) -> None:
+        """Set a yellow or green dot on the Processing tab based on job state."""
+        cid = self.proc_tab.current_crystal_id
+        if cid is None:
+            self.tabs.setTabIcon(0, QIcon())
+            return
+
+        jobs = self._db.get_jobs(cid)
+        real_jobs = [j for j in jobs if not j["dry_run"]]
+        if not real_jobs:
+            self.tabs.setTabIcon(0, QIcon())
+            return
+
+        # Green if every real job's output directory exists on the filesystem.
+        all_done = all(
+            os.path.isdir(os.path.join(j["proc_dir"], j["output_dir"]))
+            for j in real_jobs
+        )
+        color = "#44bb44" if all_done else "#e6b800"
+        self.tabs.setTabIcon(0, self._dot_icon(color))
+
+    # ---- Job polling (filesystem) ----
+
+    def _poll_jobs(self) -> None:
+        """Check each submitted job's output directory; mark completed if found."""
+        cid = self.proc_tab.current_crystal_id
+        if cid is None:
+            return
+        jobs = self._db.get_jobs(cid)
+        changed = False
+        for j in jobs:
+            if j["status"] != "submitted":
+                continue
+            output_path = os.path.join(j["proc_dir"], j["output_dir"])
+            if os.path.isdir(output_path):
+                self._db.update_job_status(j["id"], "completed")
+                changed = True
+        if changed:
+            self._update_processing_tab_indicator()
 
     # ---- Manage Projects dialog ----
 
