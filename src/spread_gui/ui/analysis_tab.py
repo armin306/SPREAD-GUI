@@ -101,7 +101,10 @@ class _AnalysisWorker(QThread):
 
     def run(self) -> None:
         try:
-            from spread_gui.core.xia2_analysis import collect_results, generate_report
+            if self._pipeline == "autoPROC":
+                from spread_gui.core.autoproc_analysis import collect_results, generate_report
+            else:
+                from spread_gui.core.xia2_analysis import collect_results, generate_report
             results = collect_results(Path(self._proc_path), self._pipeline)
             html_path = generate_report(
                 results,
@@ -151,11 +154,13 @@ class AnalysisTab(QWidget):
 
         g.addWidget(QLabel("Pipeline:"), 1, 0)
         pl_row = QHBoxLayout()
-        self.rb_dials = QRadioButton("xia2-dials")
-        self.rb_3dii  = QRadioButton("xia2-3dii")
+        self.rb_dials    = QRadioButton("xia2-dials")
+        self.rb_3dii     = QRadioButton("xia2-3dii")
+        self.rb_autoproc = QRadioButton("autoPROC")
         self.rb_dials.setChecked(True)
         pl_row.addWidget(self.rb_dials)
         pl_row.addWidget(self.rb_3dii)
+        pl_row.addWidget(self.rb_autoproc)
         pl_row.addStretch(1)
         g.addLayout(pl_row, 1, 1, 1, 2)
 
@@ -187,10 +192,14 @@ class AnalysisTab(QWidget):
         # Signals
         self.btn_run.clicked.connect(self._run_analysis)
         self.rb_dials.toggled.connect(self._update_out_label)
+        self.rb_3dii.toggled.connect(self._update_out_label)
+        self.rb_autoproc.toggled.connect(self._update_out_label)
 
     # ---- Helpers ----
 
     def _pipeline(self) -> str:
+        if self.rb_autoproc.isChecked():
+            return "autoPROC"
         return "xia2-dials" if self.rb_dials.isChecked() else "xia2-3dii"
 
     def set_proc_path(self, path: str) -> None:
@@ -227,6 +236,8 @@ class AnalysisTab(QWidget):
             self.rb_dials.setChecked(True)
         elif pipeline == "xia2_3dii":
             self.rb_3dii.setChecked(True)
+        elif pipeline == "autoproc":
+            self.rb_autoproc.setChecked(True)
         self._update_out_label()
 
     # ---- Run analysis ----
