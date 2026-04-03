@@ -269,6 +269,7 @@ def _write_html(
     n_ok    = sum(1 for wd in results.values() for s in wd.values() if s is not None)
     n_fail  = n_total - n_ok
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    proc_path = Path(proc_path_str)
 
     # ---- Run-status table ----
     header = "<th>Energy</th>" + "".join(f"<th>{w} img</th>" for w in wedges)
@@ -276,12 +277,18 @@ def _write_html(
     for energy in energies:
         cells = [f"<td>{energy} eV</td>"]
         for w in wedges:
+            summary_html = proc_path / f"{energy}eV" / f"{w}img" / pipeline / "xia2.html"
+            if summary_html.exists():
+                link_open  = f'<a href="file://{summary_html}" target="_blank">'
+                link_close = '</a>'
+            else:
+                link_open = link_close = ''
             if w not in results[energy]:
                 cells.append('<td class="na">—</td>')
             elif results[energy][w] is None:
-                cells.append('<td class="fail">&#x2717; Failed</td>')
+                cells.append(f'<td class="fail">{link_open}&#x2717; Failed{link_close}</td>')
             else:
-                cells.append('<td class="ok">&#x2713; OK</td>')
+                cells.append(f'<td class="ok">{link_open}&#x2713; OK{link_close}</td>')
         rows.append("<tr>" + "".join(cells) + "</tr>")
 
     status_table = (
