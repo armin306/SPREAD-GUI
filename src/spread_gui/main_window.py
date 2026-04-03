@@ -4,7 +4,7 @@ import glob
 import os
 from pathlib import Path
 
-from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtCore import Qt, QSize, QTimer
 from PyQt6.QtGui import QCloseEvent, QColor, QFont, QIcon, QPainter, QPixmap
 from PyQt6.QtWidgets import (
     QFrame,
@@ -159,6 +159,7 @@ class MainWindow(QMainWindow):
         self.analysis_tab = AnalysisTab(self.tabs)
         self.tabs.addTab(self.analysis_tab, "Analysis")
 
+        self.tabs.setIconSize(QSize(14, 14))
         root.addWidget(self.tabs, 1)
         self.setCentralWidget(central)
 
