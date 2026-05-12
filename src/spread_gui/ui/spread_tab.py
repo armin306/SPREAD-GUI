@@ -5,12 +5,13 @@ import os
 import shlex
 import shutil
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Dict, List, Tuple
 
 from PyQt6.QtCore import QTimer, pyqtSignal
 from PyQt6.QtGui import QFont
 from PyQt6.QtWidgets import (
     QFileDialog,
+    QGridLayout,
     QGroupBox,
     QHBoxLayout,
     QInputDialog,
@@ -33,6 +34,30 @@ from spread_gui.services.slurm import (
 )
 
 _PHENIX_SCRIPT_NAME = "phenix_jobs.sh"
+
+# Glob pattern for the MTZ file, relative to the images directory.
+_MTZ_GLOB = {
+    "xia2-dials": os.path.join("xia2-dials", "DataFiles", "*_free.mtz"),
+    "xia2-3dii":  os.path.join("xia2-3dii",  "DataFiles", "*_free.mtz"),
+    "autoPROC":   os.path.join("autoPROC", "staraniso_alldata-unique.mtz"),
+}
+
+# phenix.refine miller_array label arguments per pipeline.
+# xia2 *_free.mtz uses plain anomalous labels; autoPROC adds ",merged".
+_MILLER_LABELS = {
+    "xia2-dials": (
+        'miller_array.labels.name="I(+),SIGI(+),I(-),SIGI(-)"',
+        'miller_array.labels.name="FreeR_flag"',
+    ),
+    "xia2-3dii": (
+        'miller_array.labels.name="I(+),SIGI(+),I(-),SIGI(-)"',
+        'miller_array.labels.name="FreeR_flag"',
+    ),
+    "autoPROC": (
+        'miller_array.labels.name="I(+),SIGI(+),I(-),SIGI(-),merged"',
+        'miller_array.labels.name="FreeR_flag"',
+    ),
+}
 
 
 class SpreadTab(QWidget):
@@ -67,7 +92,6 @@ class SpreadTab(QWidget):
 
         # Input group
         in_box = QGroupBox("Input")
-        from PyQt6.QtWidgets import QGridLayout
         g = QGridLayout(in_box)
         g.setColumnStretch(1, 1)
 
@@ -76,34 +100,45 @@ class SpreadTab(QWidget):
         self.proc_path_label.setStyleSheet("color:#444;")
         g.addWidget(self.proc_path_label, 0, 1, 1, 2)
 
-        g.addWidget(QLabel("PDB model:"), 1, 0)
+        g.addWidget(QLabel("Pipeline:"), 1, 0)
+        pl_row = QHBoxLayout()
+        self.rb_dials    = QRadioButton("xia2-dials")
+        self.rb_3dii     = QRadioButton("xia2-3dii")
+        self.rb_autoproc = QRadioButton("autoPROC")
+        self.rb_autoproc.setChecked(True)
+        for rb in (self.rb_dials, self.rb_3dii, self.rb_autoproc):
+            rb.toggled.connect(self._on_pipeline_changed)
+            pl_row.addWidget(rb)
+        pl_row.addStretch(1)
+        g.addLayout(pl_row, 1, 1, 1, 2)
+
+        g.addWidget(QLabel("PDB model:"), 2, 0)
         self.pdb_label = QLabel("\u2014")
         self.pdb_label.setStyleSheet("color:#444;")
-        g.addWidget(self.pdb_label, 1, 1)
+        g.addWidget(self.pdb_label, 2, 1)
         self.btn_browse_pdb = QPushButton("Browse\u2026")
         self.btn_browse_pdb.clicked.connect(self._browse_pdb)
-        g.addWidget(self.btn_browse_pdb, 1, 2)
+        g.addWidget(self.btn_browse_pdb, 2, 2)
 
-        g.addWidget(QLabel("Anomalous groups:"), 2, 0)
+        g.addWidget(QLabel("Anomalous groups:"), 3, 0)
         self.anom_label = QLabel("\u2014")
         self.anom_label.setStyleSheet("color:#444;")
-        g.addWidget(self.anom_label, 2, 1)
+        g.addWidget(self.anom_label, 3, 1)
         self.btn_browse_anom = QPushButton("Browse\u2026")
         self.btn_browse_anom.clicked.connect(self._browse_anom)
-        g.addWidget(self.btn_browse_anom, 2, 2)
+        g.addWidget(self.btn_browse_anom, 3, 2)
 
-        g.addWidget(QLabel("Macro cycles:"), 3, 0)
+        g.addWidget(QLabel("Macro cycles:"), 4, 0)
         self.spin_cycles = QSpinBox()
         self.spin_cycles.setRange(1, 100)
         self.spin_cycles.setValue(6)
-        g.addWidget(self.spin_cycles, 3, 1)
+        g.addWidget(self.spin_cycles, 4, 1)
 
         root.addWidget(in_box)
 
         # Status group
         st_box = QGroupBox("Job status")
-        from PyQt6.QtWidgets import QGridLayout as _GL
-        sg = _GL(st_box)
+        sg = QGridLayout(st_box)
         sg.setColumnStretch(1, 1)
 
         sg.addWidget(QLabel("Run number:"), 0, 0)
@@ -155,6 +190,18 @@ class SpreadTab(QWidget):
 
         root.addStretch(1)
 
+    # ---- Pipeline helpers ----
+
+    def _pipeline(self) -> str:
+        if self.rb_dials.isChecked():
+            return "xia2-dials"
+        if self.rb_3dii.isChecked():
+            return "xia2-3dii"
+        return "autoPROC"
+
+    def _on_pipeline_changed(self) -> None:
+        self._update_job_count()
+
     # ---- File browsing ----
 
     def _browse_pdb(self) -> None:
@@ -182,41 +229,70 @@ class SpreadTab(QWidget):
         pattern = os.path.join(self._proc_path, "*eV", "*img", "phenix_*")
         max_n = 0
         for d in glob.glob(pattern):
-            basename = os.path.basename(d)
-            if basename.startswith("phenix_"):
+            name = os.path.basename(d)
+            if name.startswith("phenix_"):
                 try:
-                    max_n = max(max_n, int(basename[len("phenix_"):]))
+                    max_n = max(max_n, int(name[len("phenix_"):]))
                 except ValueError:
                     pass
         return max_n + 1
 
-    def _find_available_jobs(self) -> List[Tuple[int, int]]:
-        """Return (energy_eV, images) pairs where an autoPROC MTZ exists."""
+    def _jobs_for_pipeline(self, pipeline: str) -> List[Tuple[int, int]]:
+        """Return (energy_eV, images) pairs where an MTZ exists for the given pipeline."""
         if not self._proc_path:
             return []
-        pattern = os.path.join(
-            self._proc_path, "*eV", "*img",
-            "autoPROC", "staraniso_alldata-unique.mtz",
-        )
+        mtz_glob = _MTZ_GLOB[pipeline]
+        pattern = os.path.join(self._proc_path, "*eV", "*img", mtz_glob)
         jobs: List[Tuple[int, int]] = []
         for mtz in sorted(glob.glob(pattern)):
             p = Path(mtz).parts
+            # parts[-1] = mtz filename
+            # autoPROC:  parts[-2]="autoPROC",  parts[-3]="{N}img", parts[-4]="{E}eV"
+            # xia2:      parts[-2]="DataFiles",  parts[-3]=pipeline, parts[-4]="{N}img", parts[-5]="{E}eV"
             try:
-                energy = int(p[-4][:-2])   # strip "eV"
-                images = int(p[-3][:-3])   # strip "img"
+                if pipeline == "autoPROC":
+                    energy = int(p[-4][:-2])
+                    images = int(p[-3][:-3])
+                else:
+                    energy = int(p[-5][:-2])
+                    images = int(p[-4][:-3])
                 jobs.append((energy, images))
             except (ValueError, IndexError):
                 pass
         return jobs
 
+    def _pipeline_counts(self) -> Dict[str, int]:
+        return {pl: len(self._jobs_for_pipeline(pl)) for pl in _MTZ_GLOB}
+
     def _refresh_status(self) -> None:
-        run = self._detect_run_number()
-        self.lbl_run.setText(str(run))
-        jobs = self._find_available_jobs()
-        if jobs:
-            self.lbl_jobs.setText(f"{len(jobs)} (MTZ found for each)")
+        """Update pipeline radio button availability, run number, and job count."""
+        counts = self._pipeline_counts()
+
+        # Enable / disable radio buttons based on MTZ availability.
+        radio_map = {
+            "xia2-dials": self.rb_dials,
+            "xia2-3dii":  self.rb_3dii,
+            "autoPROC":   self.rb_autoproc,
+        }
+        for pl, rb in radio_map.items():
+            rb.setEnabled(counts[pl] > 0)
+
+        # If the currently selected pipeline has no jobs, switch to the first available.
+        if not radio_map[self._pipeline()].isEnabled():
+            for pl in ("autoPROC", "xia2-dials", "xia2-3dii"):
+                if counts[pl] > 0:
+                    radio_map[pl].setChecked(True)
+                    break
+
+        self.lbl_run.setText(str(self._detect_run_number()))
+        self._update_job_count()
+
+    def _update_job_count(self) -> None:
+        n = len(self._jobs_for_pipeline(self._pipeline()))
+        if n:
+            self.lbl_jobs.setText(f"{n} (MTZ found for each)")
         else:
-            self.lbl_jobs.setText("0 \u2014 no autoPROC MTZ files found")
+            self.lbl_jobs.setText("0 \u2014 no MTZ files found for this pipeline")
 
     # ---- SSH key ----
 
@@ -251,9 +327,28 @@ class SpreadTab(QWidget):
 
     # ---- Script generation ----
 
+    def _mtz_symlink_snippet(self, pipeline: str) -> str:
+        """Return the bash lines that create the MTZ symlink inside the phenix dir."""
+        if pipeline == "autoPROC":
+            return (
+                "ln -s ${images_dir}/autoPROC/staraniso_alldata-unique.mtz"
+                " ${energy}eV_${images}img.mtz"
+            )
+        # xia2: glob for *_free.mtz since the name encodes project/crystal
+        subdir = pipeline  # "xia2-dials" or "xia2-3dii"
+        return (
+            f'mtz_file=$(ls "${{images_dir}}/{subdir}/DataFiles/"*_free.mtz'
+            ' 2>/dev/null | head -1)\n'
+            '[ -z "$mtz_file" ] && { echo "No MTZ found for '
+            f'{subdir}" >&2; exit 1; }}\n'
+            "ln -s \"$mtz_file\" ${energy}eV_${images}img.mtz"
+        )
+
     def _make_phenix_script(
-        self, pdb_name: str, anom_name: str, run: int, macro_cycles: int
+        self, pdb_name: str, anom_name: str, run: int, macro_cycles: int, pipeline: str
     ) -> str:
+        lbl1, lbl2 = _MILLER_LABELS[pipeline]
+        mtz_snippet = self._mtz_symlink_snippet(pipeline)
         return f"""#!/bin/bash
 . /etc/profile.d/modules.sh
 #SBATCH --job-name=phenix_job
@@ -281,12 +376,12 @@ cd "$phenix_dir" || exit
 
 ln -s ${{BASE_DIR}}/files/{pdb_name} ${{energy}}eV_${{images}}img.pdb
 ln -s ${{BASE_DIR}}/files/{anom_name} .
-ln -s ${{images_dir}}/autoPROC/staraniso_alldata-unique.mtz ${{energy}}eV_${{images}}img.mtz
+{mtz_snippet}
 
 phenix.refine ${{energy}}eV_${{images}}img.pdb ${{energy}}eV_${{images}}img.mtz \\
   refinement.main.number_of_macro_cycles={macro_cycles} \\
-  miller_array.labels.name="I(+),SIGI(+),I(-),SIGI(-),merged" \\
-  miller_array.labels.name="FreeR_flag" \\
+  {lbl1} \\
+  {lbl2} \\
   strategy=group_anomalous \\
   {anom_name}
 """
@@ -305,12 +400,13 @@ phenix.refine ${{energy}}eV_${{images}}img.pdb ${{energy}}eV_${{images}}img.mtz 
                                 "Select an anomalous groups (.def) file.")
             return
 
-        jobs = self._find_available_jobs()
+        pipeline = self._pipeline()
+        jobs = self._jobs_for_pipeline(pipeline)
         if not jobs:
             QMessageBox.warning(
                 self, "No jobs ready",
-                "No autoPROC staraniso_alldata-unique.mtz files found.\n"
-                "Run autoPROC processing first.",
+                f"No MTZ files found for {pipeline}.\n"
+                "Run the corresponding processing pipeline first.",
             )
             return
 
@@ -338,14 +434,17 @@ phenix.refine ${{energy}}eV_${{images}}img.pdb ${{energy}}eV_${{images}}img.mtz 
         script_path = os.path.join(scripts_dir, _PHENIX_SCRIPT_NAME)
         try:
             with open(script_path, "wt") as fh:
-                fh.write(self._make_phenix_script(pdb_name, anom_name, run, macro_cycles))
+                fh.write(self._make_phenix_script(
+                    pdb_name, anom_name, run, macro_cycles, pipeline
+                ))
             chmod_x(script_path)
         except Exception as e:
             QMessageBox.warning(self, "Script write failed", str(e))
             return
 
         self.log_message.emit(
-            f"Phenix run {run}, {macro_cycles} macro cycle(s), {len(jobs)} job(s)"
+            f"Phenix run {run} | pipeline: {pipeline} | "
+            f"{macro_cycles} macro cycles | {len(jobs)} job(s)"
         )
         self.log_message.emit(f"PDB: {pdb_name}   Anom groups: {anom_name}")
 
