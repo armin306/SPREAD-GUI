@@ -4,13 +4,15 @@ import glob
 import os
 import shlex
 import shutil
+import webbrowser
 from pathlib import Path
 from typing import Dict, List, Tuple
 
-from PyQt6.QtCore import QTimer, pyqtSignal
+from PyQt6.QtCore import QThread, QTimer, pyqtSignal
 from PyQt6.QtGui import QFont
 from PyQt6.QtWidgets import (
     QFileDialog,
+    QFrame,
     QGridLayout,
     QGroupBox,
     QHBoxLayout,
@@ -70,6 +72,36 @@ _MILLER_LABELS = {
 }
 
 
+class _PhenixAnalysisWorker(QThread):
+    progress = pyqtSignal(str)
+    finished = pyqtSignal(str)   # HTML path
+    error    = pyqtSignal(str)   # error message
+
+    def __init__(self, proc_path: str, pipeline: str, run: int, out_dir: str) -> None:
+        super().__init__()
+        self._proc_path = proc_path
+        self._pipeline  = pipeline
+        self._run       = run
+        self._out_dir   = out_dir
+
+    def run(self) -> None:
+        try:
+            from spread_gui.core.phenix_parser import collect_results
+            from spread_gui.core.phenix_analysis import generate_report
+            results = collect_results(Path(self._proc_path), self._pipeline, self._run)
+            html_path = generate_report(
+                results,
+                Path(self._out_dir),
+                self._pipeline,
+                self._proc_path,
+                self._run,
+                self.progress.emit,
+            )
+            self.finished.emit(html_path)
+        except Exception as exc:
+            self.error.emit(str(exc))
+
+
 class SpreadTab(QWidget):
     log_message = pyqtSignal(str)
 
@@ -78,6 +110,7 @@ class SpreadTab(QWidget):
         self._proc_path: str = ""
         self._pdb_path:  str = ""
         self._anom_path: str = ""
+        self._analysis_worker: _PhenixAnalysisWorker | None = None
         self._build_ui()
         QTimer.singleShot(0, self._check_ssh_key_status)
 
@@ -87,6 +120,7 @@ class SpreadTab(QWidget):
         self._proc_path = path
         self.proc_path_label.setText(path if path else "\u2014")
         self._refresh_status()
+        self._refresh_analysis_run_numbers()
 
     # ---- UI construction ----
 
@@ -197,6 +231,72 @@ class SpreadTab(QWidget):
         a_row.addWidget(self.btn_submit)
         a_row.addStretch(1)
         root.addLayout(a_row)
+
+        # ---- Analyse SPREAD section ----
+        sep = QFrame()
+        sep.setFrameShape(QFrame.Shape.HLine)
+        sep.setFrameShadow(QFrame.Shadow.Sunken)
+        root.addWidget(sep)
+
+        analyse_title = QLabel("Analyse SPREAD")
+        af = QFont()
+        af.setPointSize(11)
+        af.setBold(True)
+        analyse_title.setFont(af)
+        root.addWidget(analyse_title)
+
+        an_box = QGroupBox("Analysis input")
+        ag = QGridLayout(an_box)
+        ag.setColumnStretch(3, 1)
+
+        ag.addWidget(QLabel("Pipeline / Run:"), 0, 0)
+
+        self.an_rb_dials    = QRadioButton("xia2-dials")
+        self.an_spin_dials  = QSpinBox()
+        self.an_spin_dials.setRange(1, 999)
+        self.an_spin_dials.setValue(1)
+
+        self.an_rb_3dii     = QRadioButton("xia2-3dii")
+        self.an_spin_3dii   = QSpinBox()
+        self.an_spin_3dii.setRange(1, 999)
+        self.an_spin_3dii.setValue(1)
+
+        self.an_rb_autoproc = QRadioButton("autoPROC")
+        self.an_spin_autoproc = QSpinBox()
+        self.an_spin_autoproc.setRange(1, 999)
+        self.an_spin_autoproc.setValue(1)
+        self.an_rb_autoproc.setChecked(True)
+
+        for row, (rb, spin) in enumerate([
+            (self.an_rb_dials,    self.an_spin_dials),
+            (self.an_rb_3dii,     self.an_spin_3dii),
+            (self.an_rb_autoproc, self.an_spin_autoproc),
+        ]):
+            ag.addWidget(rb,   row, 1)
+            ag.addWidget(QLabel("Run:"), row, 2)
+            ag.addWidget(spin, row, 3)
+
+        root.addWidget(an_box)
+
+        an_out_row = QHBoxLayout()
+        an_out_row.addWidget(QLabel("Output:"))
+        self.an_out_label = QLabel("\u2014")
+        self.an_out_label.setStyleSheet("color:#444;")
+        an_out_row.addWidget(self.an_out_label, 1)
+        root.addLayout(an_out_row)
+
+        an_btn_row = QHBoxLayout()
+        self.btn_run_analysis = QPushButton("Run Analysis")
+        self.btn_run_analysis.clicked.connect(self._run_phenix_analysis)
+        an_btn_row.addWidget(self.btn_run_analysis)
+        an_btn_row.addStretch(1)
+        root.addLayout(an_btn_row)
+
+        # Wire analysis pipeline radio buttons
+        for rb in (self.an_rb_dials, self.an_rb_3dii, self.an_rb_autoproc):
+            rb.toggled.connect(self._update_analysis_out_label)
+        for spin in (self.an_spin_dials, self.an_spin_3dii, self.an_spin_autoproc):
+            spin.valueChanged.connect(self._update_analysis_out_label)
 
         root.addStretch(1)
 
@@ -545,3 +645,95 @@ phenix.refine ${{energy}}eV_${{images}}img.pdb ${{energy}}eV_${{images}}img.mtz 
             f"Submitted {total} Phenix job(s) as run {run}.",
         )
         self._refresh_status()
+
+    # ---- Analyse SPREAD ----
+
+    def _analysis_pipeline(self) -> str:
+        if self.an_rb_dials.isChecked():
+            return "xia2-dials"
+        if self.an_rb_3dii.isChecked():
+            return "xia2-3dii"
+        return "autoPROC"
+
+    def _analysis_run(self) -> int:
+        if self.an_rb_dials.isChecked():
+            return self.an_spin_dials.value()
+        if self.an_rb_3dii.isChecked():
+            return self.an_spin_3dii.value()
+        return self.an_spin_autoproc.value()
+
+    def _detect_last_run(self, pipeline: str) -> int:
+        """Return the highest existing run number for a pipeline (min 1)."""
+        if not self._proc_path:
+            return 1
+        prefix = _PHENIX_DIR_PREFIX[pipeline]
+        pattern = os.path.join(self._proc_path, "*eV", "*img", f"{prefix}_*")
+        max_n = 0
+        for d in glob.glob(pattern):
+            name = os.path.basename(d)
+            if name.startswith(f"{prefix}_"):
+                try:
+                    max_n = max(max_n, int(name[len(prefix) + 1:]))
+                except ValueError:
+                    pass
+        return max(1, max_n)
+
+    def _refresh_analysis_run_numbers(self) -> None:
+        """Populate each analysis spinbox with the last existing run number."""
+        spin_map = {
+            "xia2-dials": self.an_spin_dials,
+            "xia2-3dii":  self.an_spin_3dii,
+            "autoPROC":   self.an_spin_autoproc,
+        }
+        for pipeline, spin in spin_map.items():
+            spin.setValue(self._detect_last_run(pipeline))
+        self._update_analysis_out_label()
+
+    def _analysis_out_dir(self) -> str:
+        if not self._proc_path:
+            return ""
+        pipeline = self._analysis_pipeline()
+        run      = self._analysis_run()
+        prefix   = _PHENIX_DIR_PREFIX[pipeline]
+        return str(Path(self._proc_path) / "results" / f"{prefix}_{run}")
+
+    def _update_analysis_out_label(self) -> None:
+        self.an_out_label.setText(self._analysis_out_dir() or "\u2014")
+
+    def _run_phenix_analysis(self) -> None:
+        if self._analysis_worker and self._analysis_worker.isRunning():
+            return
+        if not self._proc_path:
+            QMessageBox.warning(self, "No crystal loaded", "Load a crystal first.")
+            return
+        if not os.path.isdir(self._proc_path):
+            QMessageBox.warning(self, "Invalid path",
+                                f"Directory not found:\n{self._proc_path}")
+            return
+
+        pipeline = self._analysis_pipeline()
+        run      = self._analysis_run()
+        out_dir  = self._analysis_out_dir()
+
+        self.btn_run_analysis.setEnabled(False)
+        self.log_message.emit("--- Analyse SPREAD ---")
+        self.log_message.emit(f"Pipeline : {pipeline}  Run: {run}")
+        self.log_message.emit(f"Output   : {out_dir}")
+
+        self._analysis_worker = _PhenixAnalysisWorker(
+            self._proc_path, pipeline, run, out_dir
+        )
+        self._analysis_worker.progress.connect(self.log_message)
+        self._analysis_worker.finished.connect(self._on_phenix_finished)
+        self._analysis_worker.error.connect(self._on_phenix_error)
+        self._analysis_worker.start()
+
+    def _on_phenix_finished(self, html_path: str) -> None:
+        self.log_message.emit(f"Done. Opening report: {html_path}")
+        self.btn_run_analysis.setEnabled(True)
+        webbrowser.open(f"file://{html_path}")
+
+    def _on_phenix_error(self, msg: str) -> None:
+        self.log_message.emit(f"\nERROR: {msg}")
+        self.btn_run_analysis.setEnabled(True)
+        QMessageBox.critical(self, "Analysis failed", msg)
