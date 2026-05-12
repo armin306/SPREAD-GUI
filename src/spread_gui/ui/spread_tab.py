@@ -663,9 +663,9 @@ phenix.refine ${{energy}}eV_${{images}}img.pdb ${{energy}}eV_${{images}}img.mtz 
         return self.an_spin_autoproc.value()
 
     def _detect_last_run(self, pipeline: str) -> int:
-        """Return the highest existing run number for a pipeline (min 1)."""
+        """Return the highest existing run number for a pipeline, or 0 if none."""
         if not self._proc_path:
-            return 1
+            return 0
         prefix = _PHENIX_DIR_PREFIX[pipeline]
         pattern = os.path.join(self._proc_path, "*eV", "*img", f"{prefix}_*")
         max_n = 0
@@ -676,17 +676,29 @@ phenix.refine ${{energy}}eV_${{images}}img.pdb ${{energy}}eV_${{images}}img.mtz 
                     max_n = max(max_n, int(name[len(prefix) + 1:]))
                 except ValueError:
                     pass
-        return max(1, max_n)
+        return max_n
 
     def _refresh_analysis_run_numbers(self) -> None:
-        """Populate each analysis spinbox with the last existing run number."""
-        spin_map = {
-            "xia2-dials": self.an_spin_dials,
-            "xia2-3dii":  self.an_spin_3dii,
-            "autoPROC":   self.an_spin_autoproc,
+        """Enable/disable analysis radio buttons and populate spinboxes."""
+        rb_spin_map = {
+            "xia2-dials": (self.an_rb_dials,    self.an_spin_dials),
+            "xia2-3dii":  (self.an_rb_3dii,     self.an_spin_3dii),
+            "autoPROC":   (self.an_rb_autoproc,  self.an_spin_autoproc),
         }
-        for pipeline, spin in spin_map.items():
-            spin.setValue(self._detect_last_run(pipeline))
+        for pipeline, (rb, spin) in rb_spin_map.items():
+            last = self._detect_last_run(pipeline)
+            has_runs = last > 0
+            rb.setEnabled(has_runs)
+            spin.setEnabled(has_runs)
+            spin.setValue(last if has_runs else 1)
+
+        # If the selected pipeline has no runs, switch to the first available.
+        if not rb_spin_map[self._analysis_pipeline()][0].isEnabled():
+            for pipeline in ("autoPROC", "xia2-dials", "xia2-3dii"):
+                if rb_spin_map[pipeline][0].isEnabled():
+                    rb_spin_map[pipeline][0].setChecked(True)
+                    break
+
         self._update_analysis_out_label()
 
     def _analysis_out_dir(self) -> str:
