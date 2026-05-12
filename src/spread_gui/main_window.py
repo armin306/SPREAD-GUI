@@ -30,6 +30,7 @@ from PyQt6.QtWidgets import (
 from spread_gui.services.database import ProjectDB
 from spread_gui.ui.processing_tab import ProcessingTab
 from spread_gui.ui.projects_dialog import ManageProjectsDialog
+from spread_gui.ui.spread_tab import SpreadTab
 
 _DB_PATH = Path.home() / ".config" / "spread_gui" / "projects.db"
 
@@ -160,17 +161,11 @@ class MainWindow(QMainWindow):
         scroll.setWidget(self.proc_tab)
         self.tabs.addTab(scroll, "Processing")
 
-        spread_tab = QWidget()
-        sv = QVBoxLayout(spread_tab)
-        spread_title = QLabel("SPREAD Analysis")
-        spread_font = QFont()
-        spread_font.setPointSize(12)
-        spread_font.setBold(True)
-        spread_title.setFont(spread_font)
-        sv.addWidget(spread_title)
-        sv.addWidget(QLabel("Coming soon \u2014 SPREAD analysis will be implemented here."))
-        sv.addStretch(1)
-        self.tabs.addTab(spread_tab, "SPREAD")
+        self.spread_tab = SpreadTab(self.tabs)
+        spread_scroll = QScrollArea()
+        spread_scroll.setWidgetResizable(True)
+        spread_scroll.setWidget(self.spread_tab)
+        self.tabs.addTab(spread_scroll, "SPREAD")
 
         self.tabs.setIconSize(QSize(14, 14))
 
@@ -223,6 +218,10 @@ class MainWindow(QMainWindow):
         self.proc_tab.processing_info_changed.connect(self._on_processing_info_changed)
         self.proc_tab.jobs_status_changed.connect(self._update_processing_tab_indicator)
         self.proc_tab.log_message.connect(self._append_log)
+        self.proc_tab.processing_info_changed.connect(
+            lambda _d, proc, _sg, _c: self.spread_tab.set_proc_path(proc)
+        )
+        self.spread_tab.log_message.connect(self._append_log)
         self._btn_clear_log.clicked.connect(self.shared_log.clear)
         self._btn_save_log.clicked.connect(self._save_log)
 
@@ -235,8 +234,9 @@ class MainWindow(QMainWindow):
             else:
                 self.proc_tab._current_crystal_id = None
 
-        # Populate the details rows with whatever was loaded from settings.
+        # Populate the details rows and SPREAD tab with whatever was loaded from settings.
         self.proc_tab._emit_processing_info()
+        self.spread_tab.set_proc_path(self.proc_tab._proc_path)
         self._update_processing_tab_indicator()
 
         # Poll the filesystem every 60 s to detect completed jobs.
