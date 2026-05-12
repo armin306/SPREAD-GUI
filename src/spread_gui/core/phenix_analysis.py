@@ -59,7 +59,8 @@ def _overview_fig(
             if xs:
                 ax.plot(xs, ys, marker="o", color=colors[wi % len(colors)],
                         label=f"{images} img")
-        ax.legend(fontsize="small")
+        ax.legend(loc="upper left", bbox_to_anchor=(1.02, 1),
+                  borderaxespad=0, fontsize="small")
 
     plt.tight_layout()
     tag = f'<img src="data:image/png;base64,{_fig_to_b64(fig)}" style="max-width:100%;">'
@@ -103,7 +104,8 @@ def _wedge_fig(
         ax.set_xlabel("Energy (eV)")
         ax.set_ylabel(lbl)
         ax.set_title(f"{lbl} vs Energy")
-        ax.legend(fontsize="small")
+        ax.legend(loc="upper left", bbox_to_anchor=(1.02, 1),
+                  borderaxespad=0, fontsize="small")
 
     plt.tight_layout()
     tag = f'<img src="data:image/png;base64,{_fig_to_b64(fig)}" style="max-width:100%;">'

@@ -5,7 +5,7 @@
 | Document owner | Armin Wagner                                  |
 | Application    | SPREAD Processing Pipeline GUI                |
 | Status         | Current implementation                        |
-| Last updated   | April 2026                                    |
+| Last updated   | May 2026                                      |
 | Audience       | Beamline scientists, software developers      |
 
 ---
@@ -23,7 +23,8 @@ This document describes the current implemented functionality of the SPREAD Proc
 - User-visible GUI behaviour
 - Project and crystal management (database)
 - Processing parameter configuration, script generation, and job submission
-- xia2 output analysis and report generation
+- xia2 and autoPROC output analysis and report generation
+- phenix.refine anomalous refinement submission and f′/f″ analysis
 - Platform and operational constraints
 
 **Out of scope**
@@ -53,6 +54,7 @@ The SPREAD GUI is a PyQt6 desktop application that provides a structured interfa
 - Submit jobs to the Diamond compute cluster via REST API, or generate scripts for manual submission on Wilson
 - Track submitted jobs and monitor completion via filesystem polling
 - Analyse xia2 and autoPROC output across energy points and generate an HTML report with plots
+- Submit phenix.refine anomalous refinement jobs across the energy/wedge grid and analyse the resulting f′/f″ values as a function of energy
 
 The application is designed for interactive use on Diamond Linux workstations and via remote NX sessions.
 
@@ -66,22 +68,27 @@ The application is designed for interactive use on Diamond Linux workstations an
 
 ### 5.2 Major Components
 
-| Component              | Responsibility                                                                    |
-|------------------------|-----------------------------------------------------------------------------------|
-| `MainWindow`           | Application shell, header bar, tab container, status bar, job polling timer       |
-| `ProcessingTab`        | Energy/wedge/pipeline configuration, script generation, submission                |
-| `AnalysisTab`          | xia2 and autoPROC result parsing and HTML report generation                       |
-| `ManageProjectsDialog` | Two-pane project/crystal browser; crystal creation and deletion                   |
-| `SgCellDialog`         | Space group and unit cell definition (three input methods)                        |
-| `ProjectDB`            | SQLite-backed persistence for projects, crystals, settings, and submitted jobs    |
-| `xia2_parser`          | Parse xia2.txt statistics tables                                                  |
-| `xia2_analysis`        | Scan results, generate plots and HTML report for xia2                             |
-| `autoproc_parser`      | Parse aP.log STARANISO summary block                                              |
-| `autoproc_analysis`    | Scan results, generate plots and HTML report for autoPROC                         |
+| Component              | Responsibility                                                                                   |
+|------------------------|--------------------------------------------------------------------------------------------------|
+| `MainWindow`           | Application shell, header bar, tab container, shared log panel, status bar, job polling timer    |
+| `ProcessingTab`        | Energy/wedge/pipeline configuration, script generation, submission; embeds `AnalysisTab`         |
+| `AnalysisTab`          | xia2 and autoPROC result parsing and HTML report generation ("Analyse Processing" section)       |
+| `SpreadTab`            | Phenix anomalous refinement submission and f′/f″ analysis ("SPREAD" tab)                        |
+| `ManageProjectsDialog` | Two-pane project/crystal browser; crystal creation and deletion                                  |
+| `SgCellDialog`         | Space group and unit cell definition (three input methods)                                       |
+| `ProjectDB`            | SQLite-backed persistence for projects, crystals, settings, and submitted jobs                   |
+| `xia2_parser`          | Parse xia2.txt statistics tables                                                                 |
+| `xia2_analysis`        | Scan results, generate plots and HTML report for xia2                                            |
+| `autoproc_parser`      | Parse aP.log STARANISO summary block                                                             |
+| `autoproc_analysis`    | Scan results, generate plots and HTML report for autoPROC                                        |
+| `phenix_parser`        | Parse phenix.refine log files; collect f′/f″ per anomalous group across the energy/wedge grid   |
+| `phenix_analysis`      | Generate self-contained HTML report with f′/f″ vs energy plots and R-work/R-free tables         |
 
 ### 5.3 Layout
 
-- `ProcessingTab` is embedded in a `QScrollArea` for usability on small displays.
+- The application has two top-level tabs: **Processing** and **SPREAD**.
+- Both tabs are embedded in `QScrollArea` widgets for usability on small displays.
+- A **shared log panel** is permanently visible below the tabs, separated by a `QSplitter`. It shows messages from both tabs and has Clear and Save log buttons.
 - `MainWindow` carries a persistent header bar visible on all tabs.
 - SSH check and other slow operations are deferred via `QTimer.singleShot(0, …)` so the window paints before blocking.
 
@@ -264,11 +271,29 @@ Only the driver script and the **selected pipeline's** job script are written. F
 ```
 {proc_path}/
   scripts/
-    run_spread_submit.sh    Driver: iterates energies × wedges, calls pipeline script
-    autoproc_jobs.sh   \
-    xia2_dials_jobs.sh  |  One of these, depending on the selected pipeline
-    xia2_3dii_jobs.sh  /
-  files/                    Reference files (PDBs fetched from RCSB, CIFs, etc.)
+    run_spread_submit.sh       Driver: iterates energies × wedges, calls pipeline script
+    autoproc_jobs.sh      \
+    xia2_dials_jobs.sh     |  One of these, depending on the selected pipeline
+    xia2_3dii_jobs.sh     /
+    phenix_dials_jobs.sh  \
+    phenix_3dii_jobs.sh    |  Phenix refinement scripts (SPREAD tab)
+    phenix_autoproc_jobs.sh/
+  files/                       Reference files: PDBs from RCSB, anomalous groups .def
+  {energy}eV/
+    {images}img/
+      xia2-dials/              Processing pipeline output
+      xia2-3dii/
+      autoPROC/
+      phenix_dials_{run}/      phenix.refine output for this grid point
+      phenix_3dii_{run}/
+      phenix_autoproc_{run}/
+  results/
+    xia2-dials/                Processing analysis HTML report
+    xia2-3dii/
+    autoPROC/
+    phenix_dials_{run}/        SPREAD analysis HTML report
+    phenix_3dii_{run}/
+    phenix_autoproc_{run}/
 ```
 
 All generated scripts are marked executable.
@@ -344,12 +369,14 @@ This provides passive completion detection without requiring SLURM API access. F
 
 ---
 
-## 12. Analysis Tab
+## 12. Analyse Processing
+
+The "Analyse Processing" section is embedded at the bottom of the **Processing** tab, below the submission controls.
 
 ### 12.1 Input
 
-- **Processing path**: directory containing `{energy}eV` subdirectories (as written by the processing scripts). Pre-populated from the shared `settings.ini`.
-- **Pipeline**: xia2-dials, xia2-3dii, or autoPROC. Pre-selected to match the pipeline setting from the Processing tab.
+- **Processing path**: directory containing `{energy}eV` subdirectories (as written by the processing scripts). Automatically kept in sync with the processing path field in the Processing tab.
+- **Pipeline**: xia2-dials, xia2-3dii, or autoPROC.
 
 ### 12.2 xia2 Output Parsing
 
@@ -429,7 +456,97 @@ Report generation runs in a `QThread` to keep the GUI responsive. Progress messa
 
 ---
 
-## 13. Settings Persistence
+## 13. SPREAD Tab – Phenix Anomalous Refinement
+
+### 13.1 Overview
+
+The **SPREAD** tab submits `phenix.refine` anomalous refinement jobs across the full energy/wedge grid and analyses the resulting f′/f″ values as a function of energy. It operates on the output of any of the three processing pipelines (xia2-dials, xia2-3dii, autoPROC).
+
+### 13.2 Submit Jobs
+
+#### Input
+
+| Field                | Description                                                                                 |
+|----------------------|---------------------------------------------------------------------------------------------|
+| Processing path      | Inherited from the loaded crystal; shown read-only                                          |
+| Pipeline             | Radio buttons: xia2-dials, xia2-3dii, autoPROC. Greyed out when no MTZ found for that pipeline |
+| PDB model            | Browse to a `.pdb` or `.cif` file; copied immediately to `{proc_path}/files/`              |
+| Anomalous groups     | Browse to a `.def` file; copied immediately to `{proc_path}/files/`                        |
+| Macro cycles         | Integer spinbox, default 6                                                                  |
+
+File dialogs open at `{proc_path}/files/` by default. If the selected file already lives there, no copy is made.
+
+#### Job status
+
+The detected run number (next available, based on existing `phenix_{pipeline}_{N}` directories) and the number of jobs ready (one per MTZ found) are displayed. A **Refresh** button re-scans the filesystem.
+
+#### Pipeline-specific behaviour
+
+Each pipeline uses a distinct output directory prefix and job script:
+
+| Pipeline    | Output dir prefix  | Script name              | MTZ location                                    |
+|-------------|--------------------|--------------------------|-------------------------------------------------|
+| xia2-dials  | `phenix_dials`     | `phenix_dials_jobs.sh`   | `xia2-dials/DataFiles/*_free.mtz` (glob)        |
+| xia2-3dii   | `phenix_3dii`      | `phenix_3dii_jobs.sh`    | `xia2-3dii/DataFiles/*_free.mtz` (glob)         |
+| autoPROC    | `phenix_autoproc`  | `phenix_autoproc_jobs.sh`| `autoPROC/staraniso_alldata-unique.mtz` (fixed) |
+
+For xia2, the MTZ filename encodes the project and crystal name and is not known at submission time. The job script resolves it at runtime via a bash glob (`ls .../DataFiles/*_free.mtz | head -1`), aborting the job if none is found.
+
+The `miller_array.labels.name` arguments passed to `phenix.refine` differ by pipeline:
+
+| Pipeline    | Data labels                                  | Free-R label    |
+|-------------|----------------------------------------------|-----------------|
+| xia2        | `I(+),SIGI(+),I(-),SIGI(-)`                 | `FreeR_flag`    |
+| autoPROC    | `I(+),SIGI(+),I(-),SIGI(-),merged`          | `FreeR_flag`    |
+
+Each job script uses `#SBATCH --cpus-per-task=16`.
+
+#### Submission method
+
+Identical to the Processing tab: REST API (recommended) or dry run. Dry run writes the script and logs manual `sbatch` instructions.
+
+Before each submission run, the existing `phenix_{pipeline}_{run}` output directories are removed and recreated by the job script itself (not by the GUI).
+
+### 13.3 Analyse SPREAD
+
+#### Input
+
+Three rows of controls, one per pipeline, each with a radio button and a run-number spinbox:
+
+- Radio buttons are greyed out when no `phenix_{prefix}_N` directories exist for that pipeline.
+- Spinboxes are auto-populated with the **last existing run number** when a crystal is loaded or the processing path changes.
+- The selected radio button and spinbox value determine which results are parsed.
+
+#### Output directory
+
+`{proc_path}/results/{pipeline_prefix}_{run}/phenix_analysis.html`
+
+The label below the input group shows the resolved path before the analysis is run.
+
+#### Parsing (`phenix_parser`)
+
+For each log file matching `{proc_path}/*eV/*img/{prefix}_{run}/*_refine_001.log`:
+
+- Energy and images are extracted from the directory path (`{E}eV/{N}img`).
+- The final R-work and R-free are extracted from the `Final R-work = …, R-free = …` line.
+- All `Anomalous scatterer group:` blocks are collected (one per macro cycle plus the initial zeros-block). The number of unique group selections determines `n_groups`; the last `n_groups` blocks contain the final macro-cycle values.
+- Results with no anomalous groups are excluded.
+
+#### Report generation (`phenix_analysis`)
+
+The HTML report is self-contained (all plots embedded as base64 PNG) and contains:
+
+1. **Overview — f′ (all wedges)**: one subplot per anomalous group, one line per wedge size, x-axis = energy.
+2. **Overview — f″ (all wedges)**: same structure for f″.
+3. **Per-wedge sections** (ordered by increasing wedge size): for each wedge, f′ and f″ vs energy side-by-side with one line per group, followed by a table of R-work, R-free, and f′/f″ per energy.
+
+The anomalous group label used in plots is derived from the selection string as `{chain}-{resid}-{atom}` (e.g. `A-401-CA`).
+
+Report generation runs in a `QThread`. On completion the report is opened automatically in the default browser.
+
+---
+
+## 14. Settings Persistence
 
 - Settings are auto-saved 1 second after any field change (debounced `QTimer`).
 - On save: the INI file is updated and, if a crystal is loaded, `update_crystal()` is called to persist the full form state to the DB.
@@ -439,7 +556,7 @@ Report generation runs in a `QThread` to keep the GUI responsive. Progress messa
 
 ---
 
-## 14. Platform and Deployment
+## 15. Platform and Deployment
 
 - Designed for Diamond Linux workstations (RHEL-based).
 - Supports remote NX and X11 forwarding (`ssh -Y`).
@@ -449,7 +566,7 @@ Report generation runs in a `QThread` to keep the GUI responsive. Progress messa
 
 ---
 
-## 15. Limitations
+## 16. Limitations
 
 - Primary filename pattern: `<energy>_E<counter>_1_#####.cbf`; additional sweeps must follow the `<energy>_<N>_E<counter>_1_#####.cbf` convention.
 - Space group and unit cell must be set via Manage Projects before script generation.
@@ -458,10 +575,11 @@ Report generation runs in a `QThread` to keep the GUI responsive. Progress messa
 
 ---
 
-## 16. Change History
+## 17. Change History
 
 | Date       | Change                                                                                   |
 |------------|------------------------------------------------------------------------------------------|
+| May 2026   | SPREAD tab: phenix.refine anomalous refinement submission across the energy/wedge grid (per-pipeline scripts, auto-detected run number, MTZ discovery, pipeline-specific miller labels). Analyse SPREAD section: phenix.refine log parsing (`phenix_parser`), f′/f″ vs energy HTML report with overview and per-wedge plots (`phenix_analysis`). Analysis tab embedded in Processing tab as "Analyse Processing". Shared log panel (permanent, QSplitter). Application restructured to two top-level tabs (Processing, SPREAD). |
 | April 2026 | Job tracking: `jobs` table in DB; tab indicator (yellow/green dot); 60 s filesystem polling for completion detection. autoPROC output parsing from `aP.log` STARANISO block; autoPROC analysis with diffraction-limits plot. Submission simplified: dry-run radio replaces checkbox and sbatch option; only selected pipeline script generated. Run-status table cells link to pipeline HTML summaries. Overwrite deletes existing output dirs and clears DB records before re-submitting. |
 | April 2026 | Multi-sweep support: cumulative wedge directories, per-sweep image ranges, automatic sweep discovery at runtime; wedge auto-detection from CBF timestamps (background thread); scripts and files moved to `scripts/` and `files/` subdirectories; PDB saving restored |
 | April 2026 | Full rewrite: project/crystal DB, Manage Projects dialog, SgCellDialog, Analysis tab, header bar, REST API submission, removal of path fields from Processing tab |
