@@ -204,21 +204,46 @@ class SpreadTab(QWidget):
 
     # ---- File browsing ----
 
+    def _files_dir(self) -> str:
+        return os.path.join(self._proc_path, "files") if self._proc_path else ""
+
+    def _copy_to_files(self, src: str) -> str | None:
+        """Copy *src* into proc_dir/files/ and return the destination path.
+
+        Skips the copy when src already lives there.  Returns None on error.
+        """
+        files_dir = self._files_dir()
+        if not files_dir:
+            return None
+        os.makedirs(files_dir, exist_ok=True)
+        dst = os.path.join(files_dir, os.path.basename(src))
+        try:
+            if not (os.path.exists(dst) and os.path.samefile(src, dst)):
+                shutil.copy2(src, dst)
+        except Exception as e:
+            QMessageBox.warning(self, "File copy failed", str(e))
+            return None
+        return dst
+
     def _browse_pdb(self) -> None:
+        start = self._files_dir() or str(Path.home())
         path, _ = QFileDialog.getOpenFileName(
-            self, "Select PDB model", "", "PDB files (*.pdb *.cif);;All files (*)"
+            self, "Select PDB model", start, "PDB files (*.pdb *.cif);;All files (*)"
         )
         if path:
-            self._pdb_path = path
-            self.pdb_label.setText(os.path.basename(path))
+            dest = self._copy_to_files(path)
+            self._pdb_path = dest or path
+            self.pdb_label.setText(os.path.basename(self._pdb_path))
 
     def _browse_anom(self) -> None:
+        start = self._files_dir() or str(Path.home())
         path, _ = QFileDialog.getOpenFileName(
-            self, "Select anomalous groups file", "", "DEF files (*.def);;All files (*)"
+            self, "Select anomalous groups file", start, "DEF files (*.def);;All files (*)"
         )
         if path:
-            self._anom_path = path
-            self.anom_label.setText(os.path.basename(path))
+            dest = self._copy_to_files(path)
+            self._anom_path = dest or path
+            self.anom_label.setText(os.path.basename(self._anom_path))
 
     # ---- Status ----
 
