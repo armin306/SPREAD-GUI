@@ -15,7 +15,6 @@ from PyQt6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QRadioButton,
-    QTextEdit,
     QVBoxLayout,
     QWidget,
 )
@@ -122,6 +121,8 @@ class _AnalysisWorker(QThread):
 # ---------------------------------------------------------------------------
 
 class AnalysisTab(QWidget):
+    log_message = pyqtSignal(str)
+
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._worker: _AnalysisWorker | None = None
@@ -174,14 +175,6 @@ class AnalysisTab(QWidget):
         a_row.addStretch(1)
         root.addLayout(a_row)
 
-        # Log
-        root.addWidget(QLabel("Log"))
-        self.log = QTextEdit()
-        self.log.setReadOnly(True)
-        self.log.setMinimumHeight(150)
-        self.log.setPlaceholderText("Analysis output will appear here\u2026")
-        root.addWidget(self.log)
-
         # Signals
         self.btn_run.clicked.connect(self._run_analysis)
         self.rb_dials.toggled.connect(self._update_out_label)
@@ -210,8 +203,7 @@ class AnalysisTab(QWidget):
         self.out_dir_label.setText(self._default_out_dir())
 
     def _log(self, msg: str) -> None:
-        self.log.append(msg)
-        self.log.ensureCursorVisible()
+        self.log_message.emit(msg)
 
     # ---- Settings ----
 
@@ -251,8 +243,8 @@ class AnalysisTab(QWidget):
         if out_dir is None:
             return  # user cancelled
 
-        self.log.clear()
         self.btn_run.setEnabled(False)
+        self._log("--- Analyse Processing ---")
         self._log(f"Pipeline        : {self._pipeline()}")
         self._log(f"Processing path : {proc_path}")
         self._log(f"Output directory: {out_dir}")

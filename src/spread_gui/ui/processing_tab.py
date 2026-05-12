@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import configparser
-import datetime
 import glob
 import json
 import os
@@ -21,13 +20,11 @@ from PyQt6.QtWidgets import (
     QLabel,
     QLineEdit,
     QPushButton,
-    QFileDialog,
     QFrame,
     QGroupBox,
     QRadioButton,
     QDoubleSpinBox,
     QSpinBox,
-    QTextEdit,
     QMessageBox,
     QCheckBox,
     QInputDialog,
@@ -89,6 +86,8 @@ class ProcessingTab(QWidget):
     processing_info_changed = pyqtSignal(str, str, str, str)
     # Emitted after jobs are submitted so the tab indicator can be updated.
     jobs_status_changed = pyqtSignal()
+    # Log messages forwarded to the shared main-window log.
+    log_message = pyqtSignal(str)
 
     def __init__(self, db: ProjectDB, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -277,20 +276,6 @@ class ProcessingTab(QWidget):
         a_row.addStretch(1)
         root.addLayout(a_row)
 
-        # Log
-        log_header = QHBoxLayout()
-        log_header.addWidget(QLabel("Log"))
-        log_header.addStretch(1)
-        self.btn_save_log = QPushButton("Save log…")
-        log_header.addWidget(self.btn_save_log)
-        root.addLayout(log_header)
-
-        self.log = QTextEdit()
-        self.log.setReadOnly(True)
-        self.log.setMinimumHeight(150)
-        self.log.setPlaceholderText("Log…")
-        root.addWidget(self.log)
-
         # ---- Analyse Processing section ----
         sep = QFrame()
         sep.setFrameShape(QFrame.Shape.HLine)
@@ -341,13 +326,14 @@ class ProcessingTab(QWidget):
         self.rb_submit_dry.toggled.connect(self._schedule_autosave)
 
         self.btn_submit.clicked.connect(self.submit_jobs)
-        self.btn_save_log.clicked.connect(self._save_log)
         self.btn_setup_ssh_key.clicked.connect(self._setup_ssh_key)
 
-        # Keep the embedded analysis section in sync with proc_path changes.
+        # Keep the embedded analysis section in sync with proc_path changes,
+        # and forward its log messages to the shared main-window log.
         self.processing_info_changed.connect(
             lambda _d, proc, _sg, _c: self.analysis_section.set_proc_path(proc)
         )
+        self.analysis_section.log_message.connect(self.log_message)
 
     # ---------------- Defaults ----------------
     def _apply_defaults_from_cwd(self) -> None:
@@ -546,8 +532,7 @@ class ProcessingTab(QWidget):
             self._autosave_timer.start(1000)
 
     def _log(self, msg: str) -> None:
-        self.log.append(msg)
-        self.log.ensureCursorVisible()
+        self.log_message.emit(msg)
 
     def _warn(self, title: str, msg: str) -> None:
         QMessageBox.warning(self, title, msg)
@@ -563,22 +548,6 @@ class ProcessingTab(QWidget):
         self.energy_inc.setEnabled(range_mode and not auto)
         self.energy_list_edit.setEnabled((not range_mode) and (not auto))
         self._refresh_previews_and_validation()
-
-    def _save_log(self) -> None:
-        proc_dir = self._proc_path or os.getcwd()
-        ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        default_name = os.path.join(proc_dir, f"spread_gui_{ts}.log")
-        path, _ = QFileDialog.getSaveFileName(
-            self, "Save log", default_name, "Log files (*.log);;All files (*)"
-        )
-        if not path:
-            return
-        try:
-            with open(path, "wt") as fh:
-                fh.write(self.log.toPlainText())
-            self._log(f"Log saved to {path}")
-        except Exception as e:
-            self._warn("Save log failed", str(e))
 
     # ---------------- Auto-energy detection ----------------
     def _auto_energies_toggled(self, enabled: bool) -> None:

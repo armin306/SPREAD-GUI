@@ -4,9 +4,12 @@ import glob
 import os
 from pathlib import Path
 
+import datetime
+
 from PyQt6.QtCore import Qt, QSize, QTimer
 from PyQt6.QtGui import QCloseEvent, QColor, QFont, QIcon, QPainter, QPixmap
 from PyQt6.QtWidgets import (
+    QFileDialog,
     QFrame,
     QGridLayout,
     QHBoxLayout,
@@ -16,8 +19,10 @@ from PyQt6.QtWidgets import (
     QProgressBar,
     QPushButton,
     QScrollArea,
+    QSplitter,
     QStatusBar,
     QTabWidget,
+    QTextEdit,
     QVBoxLayout,
     QWidget,
 )
@@ -168,7 +173,36 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(spread_tab, "SPREAD")
 
         self.tabs.setIconSize(QSize(14, 14))
-        root.addWidget(self.tabs, 1)
+
+        # ---- Shared log panel ----
+        log_panel = QFrame()
+        log_panel.setFrameShape(QFrame.Shape.StyledPanel)
+        lv = QVBoxLayout(log_panel)
+        lv.setContentsMargins(4, 2, 4, 4)
+        lv.setSpacing(2)
+
+        log_hdr = QHBoxLayout()
+        log_hdr.addWidget(QLabel("Log"))
+        log_hdr.addStretch(1)
+        self._btn_clear_log = QPushButton("Clear")
+        self._btn_save_log  = QPushButton("Save log\u2026")
+        log_hdr.addWidget(self._btn_clear_log)
+        log_hdr.addWidget(self._btn_save_log)
+        lv.addLayout(log_hdr)
+
+        self.shared_log = QTextEdit()
+        self.shared_log.setReadOnly(True)
+        self.shared_log.setPlaceholderText("Log\u2026")
+        lv.addWidget(self.shared_log)
+
+        # ---- Splitter: tabs on top, log at bottom ----
+        splitter = QSplitter(Qt.Orientation.Vertical)
+        splitter.addWidget(self.tabs)
+        splitter.addWidget(log_panel)
+        splitter.setSizes([650, 200])
+        splitter.setChildrenCollapsible(False)
+        root.addWidget(splitter, 1)
+
         self.setCentralWidget(central)
 
         # ---- Status bar ----
@@ -188,6 +222,9 @@ class MainWindow(QMainWindow):
         )
         self.proc_tab.processing_info_changed.connect(self._on_processing_info_changed)
         self.proc_tab.jobs_status_changed.connect(self._update_processing_tab_indicator)
+        self.proc_tab.log_message.connect(self._append_log)
+        self._btn_clear_log.clicked.connect(self.shared_log.clear)
+        self._btn_save_log.clicked.connect(self._save_log)
 
         # Restore header from the crystal that was active in the previous session.
         cid = self.proc_tab.current_crystal_id
@@ -294,6 +331,28 @@ class MainWindow(QMainWindow):
         elif dlg._needs_reload and self.proc_tab.current_crystal_id is not None:
             # SG/cell was updated for the currently loaded crystal — reload it.
             self.proc_tab.load_crystal(self.proc_tab.current_crystal_id)
+
+    # ---- Shared log ----
+
+    def _append_log(self, msg: str) -> None:
+        self.shared_log.append(msg)
+        self.shared_log.ensureCursorVisible()
+
+    def _save_log(self) -> None:
+        ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        proc_dir = self.proc_tab._proc_path or os.getcwd()
+        default_name = os.path.join(proc_dir, f"spread_gui_{ts}.log")
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Save log", default_name, "Log files (*.log);;All files (*)"
+        )
+        if not path:
+            return
+        try:
+            with open(path, "wt") as fh:
+                fh.write(self.shared_log.toPlainText())
+            self._append_log(f"Log saved to {path}")
+        except Exception as exc:
+            QMessageBox.warning(self, "Save log failed", str(exc))
 
     # ---- Status bar helper ----
 
