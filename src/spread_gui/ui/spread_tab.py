@@ -33,7 +33,17 @@ from spread_gui.services.slurm import (
     submit_job_via_rest_api,
 )
 
-_PHENIX_SCRIPT_NAME = "phenix_jobs.sh"
+# Per-pipeline output directory prefix and job script name.
+_PHENIX_DIR_PREFIX = {
+    "xia2-dials": "phenix_dials",
+    "xia2-3dii":  "phenix_3dii",
+    "autoPROC":   "phenix_autoproc",
+}
+_PHENIX_SCRIPT_NAME = {
+    "xia2-dials": "phenix_dials_jobs.sh",
+    "xia2-3dii":  "phenix_3dii_jobs.sh",
+    "autoPROC":   "phenix_autoproc_jobs.sh",
+}
 
 # Glob pattern for the MTZ file, relative to the images directory.
 _MTZ_GLOB = {
@@ -200,6 +210,8 @@ class SpreadTab(QWidget):
         return "autoPROC"
 
     def _on_pipeline_changed(self) -> None:
+        pl = self._pipeline()
+        self.lbl_run.setText(str(self._detect_run_number(pl)))
         self._update_job_count()
 
     # ---- File browsing ----
@@ -247,17 +259,18 @@ class SpreadTab(QWidget):
 
     # ---- Status ----
 
-    def _detect_run_number(self) -> int:
-        """Return the next available phenix_N run number."""
+    def _detect_run_number(self, pipeline: str) -> int:
+        """Return the next available run number for the given pipeline prefix."""
         if not self._proc_path:
             return 1
-        pattern = os.path.join(self._proc_path, "*eV", "*img", "phenix_*")
+        prefix = _PHENIX_DIR_PREFIX[pipeline]
+        pattern = os.path.join(self._proc_path, "*eV", "*img", f"{prefix}_*")
         max_n = 0
         for d in glob.glob(pattern):
             name = os.path.basename(d)
-            if name.startswith("phenix_"):
+            if name.startswith(f"{prefix}_"):
                 try:
-                    max_n = max(max_n, int(name[len("phenix_"):]))
+                    max_n = max(max_n, int(name[len(prefix) + 1:]))
                 except ValueError:
                     pass
         return max_n + 1
@@ -309,7 +322,7 @@ class SpreadTab(QWidget):
                     radio_map[pl].setChecked(True)
                     break
 
-        self.lbl_run.setText(str(self._detect_run_number()))
+        self.lbl_run.setText(str(self._detect_run_number(self._pipeline())))
         self._update_job_count()
 
     def _update_job_count(self) -> None:
@@ -374,6 +387,7 @@ class SpreadTab(QWidget):
     ) -> str:
         lbl1, lbl2 = _MILLER_LABELS[pipeline]
         mtz_snippet = self._mtz_symlink_snippet(pipeline)
+        dir_prefix = _PHENIX_DIR_PREFIX[pipeline]
         return f"""#!/bin/bash
 . /etc/profile.d/modules.sh
 #SBATCH --job-name=phenix_job
@@ -393,7 +407,7 @@ images=$2
 
 energy_dir="${{BASE_DIR}}/${{energy}}eV"
 images_dir="${{energy_dir}}/${{images}}img"
-phenix_dir="${{images_dir}}/phenix_${{RUN}}"
+phenix_dir="${{images_dir}}/{dir_prefix}_${{RUN}}"
 
 rm -rf "$phenix_dir"
 mkdir -p "$phenix_dir"
@@ -435,7 +449,7 @@ phenix.refine ${{energy}}eV_${{images}}img.pdb ${{energy}}eV_${{images}}img.mtz 
             )
             return
 
-        run          = self._detect_run_number()
+        run          = self._detect_run_number(pipeline)
         macro_cycles = self.spin_cycles.value()
         dry          = self.rb_dry.isChecked()
         proc_dir     = self._proc_path
@@ -458,7 +472,7 @@ phenix.refine ${{energy}}eV_${{images}}img.pdb ${{energy}}eV_${{images}}img.mtz 
             return
 
         # Write phenix job script
-        script_path = os.path.join(scripts_dir, _PHENIX_SCRIPT_NAME)
+        script_path = os.path.join(scripts_dir, _PHENIX_SCRIPT_NAME[pipeline])
         try:
             with open(script_path, "wt") as fh:
                 fh.write(self._make_phenix_script(
@@ -484,7 +498,7 @@ phenix.refine ${{energy}}eV_${{images}}img.pdb ${{energy}}eV_${{images}}img.mtz 
             self.log_message.emit(f"  cd {shlex.quote(proc_dir)}")
             for energy, images in jobs:
                 self.log_message.emit(
-                    f"  sbatch scripts/{_PHENIX_SCRIPT_NAME} {energy} {images}"
+                    f"  sbatch scripts/{_PHENIX_SCRIPT_NAME[pipeline]} {energy} {images}"
                 )
             return
 
