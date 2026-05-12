@@ -152,7 +152,7 @@ def submit_job_via_rest_api(
             "tasks": 1,
             "name": job_name,
             "nodes": 1,
-            "cpus_per_task": "20",
+            "cpus_per_task": "16",
             "memory_per_cpu": "10G",
             "current_working_directory": cwd,
             "environment": {

@@ -395,7 +395,7 @@ class SpreadTab(QWidget):
 #SBATCH --error=slurm-%j.err
 #SBATCH --partition=cs04r
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=20
+#SBATCH --cpus-per-task=16
 #SBATCH --mem=10G
 module load phenix
 

@@ -793,7 +793,7 @@ done
 #SBATCH --error=slurm-%j.err
 #SBATCH --partition=cs04r
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=20
+#SBATCH --cpus-per-task=16
 #SBATCH --mem=10G
 module load autoPROC
 BASE_DIR=$(pwd)
@@ -844,7 +844,7 @@ process -M DiamondI23 \\
 #SBATCH --error=slurm-%j.err
 #SBATCH --partition=cs04r
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=20
+#SBATCH --cpus-per-task=16
 #SBATCH --mem=10G
 module load xia2
 BASE_DIR=$(pwd)
@@ -898,7 +898,7 @@ xia2 pipeline=dials \\
 #SBATCH --error=slurm-%j.err
 #SBATCH --partition=cs04r
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=20
+#SBATCH --cpus-per-task=16
 #SBATCH --mem=10G
 module load xia2
 BASE_DIR=$(pwd)
