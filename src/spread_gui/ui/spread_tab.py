@@ -424,8 +424,10 @@ phenix.refine ${{energy}}eV_${{images}}img.pdb ${{energy}}eV_${{images}}img.mtz 
         os.makedirs(scripts_dir, exist_ok=True)
 
         try:
-            shutil.copy2(self._pdb_path,  os.path.join(files_dir, pdb_name))
-            shutil.copy2(self._anom_path, os.path.join(files_dir, anom_name))
+            for src, name in ((self._pdb_path, pdb_name), (self._anom_path, anom_name)):
+                dst = os.path.join(files_dir, name)
+                if not (os.path.exists(dst) and os.path.samefile(src, dst)):
+                    shutil.copy2(src, dst)
         except Exception as e:
             QMessageBox.warning(self, "File copy failed", str(e))
             return
