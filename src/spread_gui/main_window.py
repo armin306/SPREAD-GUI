@@ -23,7 +23,6 @@ from PyQt6.QtWidgets import (
 )
 
 from spread_gui.services.database import ProjectDB
-from spread_gui.ui.analysis_tab import AnalysisTab
 from spread_gui.ui.processing_tab import ProcessingTab
 from spread_gui.ui.projects_dialog import ManageProjectsDialog
 
@@ -156,8 +155,17 @@ class MainWindow(QMainWindow):
         scroll.setWidget(self.proc_tab)
         self.tabs.addTab(scroll, "Processing")
 
-        self.analysis_tab = AnalysisTab(self.tabs)
-        self.tabs.addTab(self.analysis_tab, "Analysis")
+        spread_tab = QWidget()
+        sv = QVBoxLayout(spread_tab)
+        spread_title = QLabel("SPREAD Analysis")
+        spread_font = QFont()
+        spread_font.setPointSize(12)
+        spread_font.setBold(True)
+        spread_title.setFont(spread_font)
+        sv.addWidget(spread_title)
+        sv.addWidget(QLabel("Coming soon \u2014 SPREAD analysis will be implemented here."))
+        sv.addStretch(1)
+        self.tabs.addTab(spread_tab, "SPREAD")
 
         self.tabs.setIconSize(QSize(14, 14))
         root.addWidget(self.tabs, 1)
@@ -179,9 +187,6 @@ class MainWindow(QMainWindow):
             lambda _p, _c: self._update_processing_tab_indicator()
         )
         self.proc_tab.processing_info_changed.connect(self._on_processing_info_changed)
-        self.proc_tab.processing_info_changed.connect(
-            lambda _d, proc, _sg, _c: self.analysis_tab.set_proc_path(proc)
-        )
         self.proc_tab.jobs_status_changed.connect(self._update_processing_tab_indicator)
 
         # Restore header from the crystal that was active in the previous session.

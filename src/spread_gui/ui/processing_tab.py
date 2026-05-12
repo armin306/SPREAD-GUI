@@ -22,6 +22,7 @@ from PyQt6.QtWidgets import (
     QLineEdit,
     QPushButton,
     QFileDialog,
+    QFrame,
     QGroupBox,
     QRadioButton,
     QDoubleSpinBox,
@@ -286,8 +287,26 @@ class ProcessingTab(QWidget):
 
         self.log = QTextEdit()
         self.log.setReadOnly(True)
+        self.log.setMinimumHeight(150)
         self.log.setPlaceholderText("Log…")
-        root.addWidget(self.log, 1)
+        root.addWidget(self.log)
+
+        # ---- Analyse Processing section ----
+        sep = QFrame()
+        sep.setFrameShape(QFrame.Shape.HLine)
+        sep.setStyleSheet("color: #b0bcd0;")
+        root.addWidget(sep)
+
+        from spread_gui.ui.analysis_tab import AnalysisTab
+        analyse_title = QLabel("Analyse Processing")
+        af = QFont()
+        af.setPointSize(12)
+        af.setBold(True)
+        analyse_title.setFont(af)
+        root.addWidget(analyse_title)
+
+        self.analysis_section = AnalysisTab(self)
+        root.addWidget(self.analysis_section)
 
         self._update_energy_mode()
 
@@ -324,6 +343,11 @@ class ProcessingTab(QWidget):
         self.btn_submit.clicked.connect(self.submit_jobs)
         self.btn_save_log.clicked.connect(self._save_log)
         self.btn_setup_ssh_key.clicked.connect(self._setup_ssh_key)
+
+        # Keep the embedded analysis section in sync with proc_path changes.
+        self.processing_info_changed.connect(
+            lambda _d, proc, _sg, _c: self.analysis_section.set_proc_path(proc)
+        )
 
     # ---------------- Defaults ----------------
     def _apply_defaults_from_cwd(self) -> None:

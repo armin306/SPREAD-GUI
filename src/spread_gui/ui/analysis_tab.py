@@ -6,7 +6,6 @@ import webbrowser
 from pathlib import Path
 
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
-from PyQt6.QtGui import QFont
 from PyQt6.QtWidgets import (
     QDialog,
     QGroupBox,
@@ -135,13 +134,6 @@ class AnalysisTab(QWidget):
     def _build_ui(self) -> None:
         root = QVBoxLayout(self)
 
-        title = QLabel("SPREAD \u2013 Analysis")
-        f = QFont()
-        f.setPointSize(12)
-        f.setBold(True)
-        title.setFont(f)
-        root.addWidget(title)
-
         # Input group
         in_box = QGroupBox("Input")
         from PyQt6.QtWidgets import QGridLayout
@@ -186,8 +178,9 @@ class AnalysisTab(QWidget):
         root.addWidget(QLabel("Log"))
         self.log = QTextEdit()
         self.log.setReadOnly(True)
+        self.log.setMinimumHeight(150)
         self.log.setPlaceholderText("Analysis output will appear here\u2026")
-        root.addWidget(self.log, 1)
+        root.addWidget(self.log)
 
         # Signals
         self.btn_run.clicked.connect(self._run_analysis)
