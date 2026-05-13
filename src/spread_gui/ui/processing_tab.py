@@ -987,8 +987,11 @@ xia2 pipeline=3dii \\
         proc_dir = self._proc_path
         cell = self._cell or Cell(0, 0, 0, 0, 0, 0)
         sg = normalize_sg_name(self._space_group) if self._space_group else ""
-        project = self._project.strip() or "PROJECT"
-        crystal = self._crystal.strip() or "CRYSTAL"
+        if self._current_crystal_id is not None:
+            project, crystal = self._db.get_crystal_info(self._current_crystal_id)
+        else:
+            project = self._project.strip() or "PROJECT"
+            crystal = self._crystal.strip() or "CRYSTAL"
 
         pipeline = self._pipeline_key()
         total_images = int(self.total_images.value())
