@@ -59,6 +59,8 @@ def _overview_fig(
             if xs:
                 ax.plot(xs, ys, marker="o", color=colors[wi % len(colors)],
                         label=f"{images} img")
+        ax.set_xticks(sorted(energies))
+        ax.tick_params(axis="x", rotation=45)
         ax.legend(loc="upper left", bbox_to_anchor=(1.02, 1),
                   borderaxespad=0, fontsize="small")
 
@@ -104,6 +106,8 @@ def _wedge_fig(
         ax.set_xlabel("Energy (eV)")
         ax.set_ylabel(lbl)
         ax.set_title(f"{lbl} vs Energy")
+        ax.set_xticks(sorted(energies))
+        ax.tick_params(axis="x", rotation=45)
         ax.legend(loc="upper left", bbox_to_anchor=(1.02, 1),
                   borderaxespad=0, fontsize="small")
 

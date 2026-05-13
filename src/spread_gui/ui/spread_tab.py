@@ -48,9 +48,10 @@ _PHENIX_SCRIPT_NAME = {
 }
 
 # Glob pattern for the MTZ file, relative to the images directory.
+# xia2 may create a project/crystal subdirectory hierarchy, so use ** for recursion.
 _MTZ_GLOB = {
-    "xia2-dials": os.path.join("xia2-dials", "DataFiles", "*_free.mtz"),
-    "xia2-3dii":  os.path.join("xia2-3dii",  "DataFiles", "*_free.mtz"),
+    "xia2-dials": os.path.join("xia2-dials", "**", "*_free.mtz"),
+    "xia2-3dii":  os.path.join("xia2-3dii",  "**", "*_free.mtz"),
     "autoPROC":   os.path.join("autoPROC", "staraniso_alldata-unique.mtz"),
 }
 
@@ -380,24 +381,20 @@ class SpreadTab(QWidget):
         if not self._proc_path:
             return []
         mtz_glob = _MTZ_GLOB[pipeline]
+        recursive = pipeline != "autoPROC"
         pattern = os.path.join(self._proc_path, "*eV", "*img", mtz_glob)
-        jobs: List[Tuple[int, int]] = []
-        for mtz in sorted(glob.glob(pattern)):
-            p = Path(mtz).parts
-            # parts[-1] = mtz filename
-            # autoPROC:  parts[-2]="autoPROC",  parts[-3]="{N}img", parts[-4]="{E}eV"
-            # xia2:      parts[-2]="DataFiles",  parts[-3]=pipeline, parts[-4]="{N}img", parts[-5]="{E}eV"
+        seen: set[Tuple[int, int]] = set()
+        for mtz in glob.glob(pattern, recursive=recursive):
+            parts = Path(mtz).parts
+            # Extract energy and images by finding the *eV and *img path components,
+            # which are always present regardless of xia2's project/crystal subdir depth.
             try:
-                if pipeline == "autoPROC":
-                    energy = int(p[-4][:-2])
-                    images = int(p[-3][:-3])
-                else:
-                    energy = int(p[-5][:-2])
-                    images = int(p[-4][:-3])
-                jobs.append((energy, images))
-            except (ValueError, IndexError):
+                energy = next(int(p[:-2]) for p in parts if p.endswith("eV") and p[:-2].isdigit())
+                images = next(int(p[:-3]) for p in parts if p.endswith("img") and p[:-3].isdigit())
+                seen.add((energy, images))
+            except StopIteration:
                 pass
-        return jobs
+        return sorted(seen)
 
     def _pipeline_counts(self) -> Dict[str, int]:
         return {pl: len(self._jobs_for_pipeline(pl)) for pl in _MTZ_GLOB}
@@ -472,14 +469,15 @@ class SpreadTab(QWidget):
                 "ln -s ${images_dir}/autoPROC/staraniso_alldata-unique.mtz"
                 " ${energy}eV_${images}img.mtz"
             )
-        # xia2: glob for *_free.mtz since the name encodes project/crystal
+        # xia2: search recursively — xia2 may place DataFiles under a
+        # project/crystal subdirectory depending on how it was invoked.
         subdir = pipeline  # "xia2-dials" or "xia2-3dii"
         return (
-            f'mtz_file=$(ls "${{images_dir}}/{subdir}/DataFiles/"*_free.mtz'
+            f'mtz_file=$(find "${{images_dir}}/{subdir}" -name "*_free.mtz"'
             ' 2>/dev/null | head -1)\n'
-            '[ -z "$mtz_file" ] && { echo "No MTZ found for '
+            '[ -z "$mtz_file" ] && { echo "No MTZ found under '
             f'{subdir}" >&2; exit 1; }}\n'
-            "ln -s \"$mtz_file\" ${energy}eV_${images}img.mtz"
+            'ln -s "$mtz_file" ${energy}eV_${images}img.mtz'
         )
 
     def _make_phenix_script(
