@@ -113,15 +113,13 @@ def parse_phenix_log(path: Path) -> Optional[PhenixResult]:
     if not all_groups:
         return None
 
-    # Determine the number of unique groups from first-occurrence order.
-    seen: dict[str, int] = {}
+    # Keep only the last occurrence of each selection — that is the
+    # final macro-cycle value regardless of how many cycles ran.
+    # Use an ordered dict to preserve the original group order.
+    last: dict[str, PhenixGroup] = {}
     for g in all_groups:
-        if g.selection not in seen:
-            seen[g.selection] = len(seen)
-    n_groups = len(seen)
-
-    # The last n_groups blocks are the final macro-cycle values.
-    final_groups = all_groups[-n_groups:]
+        last[g.selection] = g
+    final_groups = list(last.values())
 
     return PhenixResult(
         energy_ev=energy,
