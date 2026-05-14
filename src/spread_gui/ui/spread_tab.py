@@ -432,6 +432,7 @@ class SpreadTab(QWidget):
 
         self.lbl_run.setText(str(self._detect_run_number(self._pipeline())))
         self._update_job_count()
+        self._refresh_analysis_run_numbers()
 
     def _update_job_count(self) -> None:
         n = len(self._jobs_for_pipeline(self._pipeline()))
