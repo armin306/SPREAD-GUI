@@ -47,13 +47,8 @@ _PHENIX_SCRIPT_NAME = {
     "autoPROC":   "phenix_autoproc_jobs.sh",
 }
 
-# Glob pattern for the MTZ file, relative to the images directory.
-# xia2 may create a project/crystal subdirectory hierarchy, so use ** for recursion.
-_MTZ_GLOB = {
-    "xia2-dials": os.path.join("xia2-dials", "**", "*_free.mtz"),
-    "xia2-3dii":  os.path.join("xia2-3dii",  "**", "*_free.mtz"),
-    "autoPROC":   os.path.join("autoPROC", "staraniso_alldata-unique.mtz"),
-}
+# Pipelines known to the status checker (used as iteration key).
+_PIPELINES = ("xia2-dials", "xia2-3dii", "autoPROC")
 
 # phenix.refine miller_array label arguments per pipeline.
 # xia2 *_free.mtz uses plain anomalous labels; autoPROC adds ",merged".
@@ -380,24 +375,40 @@ class SpreadTab(QWidget):
         """Return (energy_eV, images) pairs where an MTZ exists for the given pipeline."""
         if not self._proc_path:
             return []
-        mtz_glob = _MTZ_GLOB[pipeline]
-        recursive = pipeline != "autoPROC"
-        pattern = os.path.join(self._proc_path, "*eV", "*img", mtz_glob)
         seen: set[Tuple[int, int]] = set()
-        for mtz in glob.glob(pattern, recursive=recursive):
-            parts = Path(mtz).parts
-            # Extract energy and images by finding the *eV and *img path components,
-            # which are always present regardless of xia2's project/crystal subdir depth.
-            try:
-                energy = next(int(p[:-2]) for p in parts if p.endswith("eV") and p[:-2].isdigit())
-                images = next(int(p[:-3]) for p in parts if p.endswith("img") and p[:-3].isdigit())
-                seen.add((energy, images))
-            except StopIteration:
-                pass
+        if pipeline == "autoPROC":
+            pattern = os.path.join(
+                self._proc_path, "*eV", "*img",
+                "autoPROC", "staraniso_alldata-unique.mtz",
+            )
+            for mtz in glob.glob(pattern):
+                parts = Path(mtz).parts
+                try:
+                    energy = next(int(p[:-2]) for p in parts if p.endswith("eV") and p[:-2].isdigit())
+                    images = next(int(p[:-3]) for p in parts if p.endswith("img") and p[:-3].isdigit())
+                    seen.add((energy, images))
+                except StopIteration:
+                    pass
+        else:
+            # Use Path.rglob to handle any project/crystal subdir depth that
+            # xia2 may create inside the pipeline directory.
+            for ev_dir in glob.glob(os.path.join(self._proc_path, "*eV")):
+                try:
+                    energy = int(Path(ev_dir).name[:-2])
+                except ValueError:
+                    continue
+                for img_dir in glob.glob(os.path.join(ev_dir, "*img")):
+                    try:
+                        images = int(Path(img_dir).name[:-3])
+                    except ValueError:
+                        continue
+                    pl_dir = Path(img_dir) / pipeline
+                    if pl_dir.is_dir() and any(pl_dir.rglob("*_free.mtz")):
+                        seen.add((energy, images))
         return sorted(seen)
 
     def _pipeline_counts(self) -> Dict[str, int]:
-        return {pl: len(self._jobs_for_pipeline(pl)) for pl in _MTZ_GLOB}
+        return {pl: len(self._jobs_for_pipeline(pl)) for pl in _PIPELINES}
 
     def _refresh_status(self) -> None:
         """Update pipeline radio button availability, run number, and job count."""
