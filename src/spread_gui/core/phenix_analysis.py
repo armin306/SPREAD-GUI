@@ -22,43 +22,41 @@ def _fig_to_b64(fig) -> str:
     return base64.b64encode(buf.read()).decode("ascii")
 
 
-def _overview_fig(
+def _group_summary_fig(
     results: dict[tuple[int, int], PhenixResult],
     energies: list[int],
     wedges: list[int],
-    groups: list[str],
-    attr: str,
-    ylabel: str,
-    title: str,
+    sel: str,
 ) -> str:
-    """Return an HTML <img> tag for an overview plot (one subplot per group)."""
+    """Return an HTML <img> tag for one anomalous group: f' and f'' side-by-side, one line per wedge."""
     import matplotlib.pyplot as plt
     import matplotlib.cm as cm
 
-    n = len(groups)
-    fig, axes = plt.subplots(1, max(n, 1), figsize=(4 * max(n, 1), 4), squeeze=False)
-    fig.suptitle(title)
+    colors = cm.tab10.colors
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(11, 4))
+    fig.suptitle(group_short_label(sel))
 
-    for gi, sel in enumerate(groups):
-        ax = axes[0][gi]
-        ax.set_title(group_short_label(sel))
+    for wi, images in enumerate(sorted(wedges)):
+        xs, fps, fdps = [], [], []
+        for energy in sorted(energies):
+            res = results.get((energy, images))
+            if res is None:
+                continue
+            for g in res.groups:
+                if g.selection == sel:
+                    xs.append(energy)
+                    fps.append(g.f_prime)
+                    fdps.append(g.f_double_prime)
+                    break
+        c = colors[wi % len(colors)]
+        if xs:
+            ax1.plot(xs, fps, marker="o", color=c, label=f"{images} img")
+            ax2.plot(xs, fdps, marker="o", color=c, label=f"{images} img")
+
+    for ax, lbl in ((ax1, "f'"), (ax2, "f''")):
         ax.set_xlabel("Energy (eV)")
-        ax.set_ylabel(ylabel)
-        colors = cm.tab10.colors
-        for wi, images in enumerate(sorted(wedges)):
-            xs, ys = [], []
-            for energy in sorted(energies):
-                res = results.get((energy, images))
-                if res is None:
-                    continue
-                for g in res.groups:
-                    if g.selection == sel:
-                        xs.append(energy)
-                        ys.append(getattr(g, attr))
-                        break
-            if xs:
-                ax.plot(xs, ys, marker="o", color=colors[wi % len(colors)],
-                        label=f"{images} img")
+        ax.set_ylabel(lbl)
+        ax.set_title(f"{lbl} vs Energy")
         ax.set_xticks(sorted(energies))
         ax.tick_params(axis="x", rotation=45)
         ax.legend(loc="upper left", bbox_to_anchor=(1.02, 1),
@@ -194,15 +192,14 @@ def generate_report(
                 groups.append(g.selection)
                 seen.add(g.selection)
 
-    progress("Generating overview plots…")
-    fp_overview = _overview_fig(
-        results, energies, wedges, groups,
-        "f_prime", "f'", "f\u2019 vs Energy \u2014 all wedges",
-    )
-    fdp_overview = _overview_fig(
-        results, energies, wedges, groups,
-        "f_double_prime", "f\u2019\u2019", "f\u2019\u2019 vs Energy \u2014 all wedges",
-    )
+    progress("Generating summary plots…")
+    group_summary_sections: list[str] = []
+    for sel in groups:
+        label = group_short_label(sel)
+        img_tag = _group_summary_fig(results, energies, wedges, sel)
+        group_summary_sections.append(
+            f"<h2>Summary \u2014 {label} (all wedges)</h2>\n{img_tag}"
+        )
 
     wedge_sections: list[str] = []
     for images in wedges:
@@ -238,11 +235,7 @@ table {{ margin-bottom: 12px; }}
   <b>Path:</b> {proc_path}
 </p>
 
-<h2>Overview \u2014 f\u2019 (all wedges)</h2>
-{fp_overview}
-
-<h2>Overview \u2014 f\u2019\u2019 (all wedges)</h2>
-{fdp_overview}
+{"".join(group_summary_sections)}
 
 {"".join(wedge_sections)}
 </body>

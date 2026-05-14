@@ -92,6 +92,8 @@ def parse_phenix_log(path: Path) -> Optional[PhenixResult]:
             selection = f_prime = f_double_prime = None
             for j in range(i + 1, min(i + 8, len(lines))):
                 l = lines[j].strip()
+                if l == "Anomalous scatterer group:":
+                    break
                 if l.startswith('Selection:'):
                     sm = re.match(r'Selection:\s*"([^"]+)"', l)
                     if sm:
