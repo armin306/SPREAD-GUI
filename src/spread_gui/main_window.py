@@ -231,10 +231,8 @@ class MainWindow(QMainWindow):
         # Restore header from the crystal that was active in the previous session.
         cid = self.proc_tab.current_crystal_id
         if cid is not None:
-            project, crystal = self._db.get_crystal_info(cid)
+            project, crystal, rpath = self._db.get_crystal_context(cid)
             if project:
-                proj_obj = self._db.get_project_for_crystal(cid)
-                rpath = proj_obj.results_path if proj_obj else ""
                 self._on_crystal_context_changed(project, crystal, rpath)
                 self.spread_tab.set_context(project, crystal, rpath)
                 self.proc_tab.analysis_section.set_context(project, crystal, rpath)

@@ -392,6 +392,27 @@ class ProcessingTab(QWidget):
 
     def _apply_form_state(self, s: dict) -> None:
         """Populate form fields from a flat string dict."""
+        # Block all widget signals while we batch-update values so that
+        # _refresh_previews_and_validation and _schedule_energy_scan are not
+        # called dozens of times redundantly. They are called once explicitly
+        # at the end of load_crystal() after signals are unblocked.
+        _widgets = [
+            self.energy_start, self.energy_end, self.energy_inc,
+            self.energy_list_edit, self.wedge_size, self.total_images,
+            self.rb_energy_range, self.rb_energy_list,
+            self.rb_xia2_dials, self.rb_xia2_3dii, self.rb_autoproc,
+            self.rb_submit_rest, self.rb_submit_dry,
+            self.chk_auto_energies, self.chk_auto_wedges,
+        ]
+        for w in _widgets:
+            w.blockSignals(True)
+        try:
+            self._apply_form_state_inner(s)
+        finally:
+            for w in _widgets:
+                w.blockSignals(False)
+
+    def _apply_form_state_inner(self, s: dict) -> None:
         if "visit"   in s: self._visit   = s["visit"]
         if "project" in s: self._project = s["project"]
         if "crystal" in s: self._crystal = s["crystal"]
@@ -523,9 +544,7 @@ class ProcessingTab(QWidget):
         self.save_settings()           # sync INI immediately
         self._refresh_previews_and_validation()
         self._schedule_energy_scan()
-        project_name, crystal_name = self._db.get_crystal_info(crystal_id)
-        project = self._db.get_project_for_crystal(crystal_id)
-        results_path = project.results_path if project else ""
+        project_name, crystal_name, results_path = self._db.get_crystal_context(crystal_id)
         self.crystal_context_changed.emit(project_name, crystal_name, results_path)
         self._emit_processing_info()
 

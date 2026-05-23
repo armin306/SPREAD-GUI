@@ -290,6 +290,19 @@ class ProjectDB:
             return ("", "")
         return (row["pname"], row["cname"])
 
+    def get_crystal_context(self, crystal_id: int) -> tuple[str, str, str]:
+        """Return (project_name, crystal_name, results_path) in a single query."""
+        with self._connect() as con:
+            row = con.execute(
+                "SELECT p.name AS pname, c.name AS cname, p.results_path "
+                "FROM crystals c JOIN projects p ON c.project_id = p.id "
+                "WHERE c.id=?",
+                (crystal_id,),
+            ).fetchone()
+        if row is None:
+            return ("", "", "")
+        return (row["pname"], row["cname"], row["results_path"])
+
     # ---- jobs ----
 
     def add_job(

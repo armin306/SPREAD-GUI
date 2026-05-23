@@ -68,6 +68,60 @@ _MILLER_LABELS = {
 }
 
 
+class _StatusScanWorker(QThread):
+    """Scans the proc directory for pipeline MTZ files and run dirs off the main thread."""
+    finished = pyqtSignal(dict, dict)   # pipeline_counts, last_runs
+
+    def __init__(self, proc_path: str) -> None:
+        super().__init__()
+        self._proc_path = proc_path
+
+    def run(self) -> None:
+        import glob as _glob
+        counts: dict[str, int] = {}
+        last_runs: dict[str, int] = {}
+        for pipeline in _PIPELINES:
+            # Count MTZ files (same logic as _jobs_for_pipeline but lightweight)
+            if pipeline == "autoPROC":
+                pattern = os.path.join(
+                    self._proc_path, "*eV", "*img",
+                    "autoPROC", "staraniso_alldata-unique.mtz",
+                )
+                counts[pipeline] = len(_glob.glob(pattern))
+            else:
+                from pathlib import Path as _Path
+                n = 0
+                for ev_dir in _glob.glob(os.path.join(self._proc_path, "*eV")):
+                    try:
+                        int(_Path(ev_dir).name[:-2])
+                    except ValueError:
+                        continue
+                    for img_dir in _glob.glob(os.path.join(ev_dir, "*img")):
+                        try:
+                            int(_Path(img_dir).name[:-3])
+                        except ValueError:
+                            continue
+                        pl_dir = _Path(img_dir) / pipeline
+                        if pl_dir.is_dir() and any(pl_dir.rglob("*_free.mtz")):
+                            n += 1
+                counts[pipeline] = n
+
+            # Detect last run number
+            prefix = _PHENIX_DIR_PREFIX[pipeline]
+            pattern2 = os.path.join(self._proc_path, "*eV", "*img", f"{prefix}_*")
+            max_n = 0
+            for d in _glob.glob(pattern2):
+                name = os.path.basename(d)
+                if name.startswith(f"{prefix}_"):
+                    try:
+                        max_n = max(max_n, int(name[len(prefix) + 1:]))
+                    except ValueError:
+                        pass
+            last_runs[pipeline] = max_n
+
+        self.finished.emit(counts, last_runs)
+
+
 class _PhenixAnalysisWorker(QThread):
     progress = pyqtSignal(str)
     finished = pyqtSignal(str)   # HTML path
@@ -144,6 +198,7 @@ class SpreadTab(QWidget):
         self._project_name: str = ""
         self._crystal_name: str = ""
         self._analysis_worker: _PhenixAnalysisWorker | None = None
+        self._status_worker:   _StatusScanWorker | None = None
         self._build_ui()
         QTimer.singleShot(0, self._check_ssh_key_status)
 
@@ -350,9 +405,7 @@ class SpreadTab(QWidget):
         return "autoPROC"
 
     def _on_pipeline_changed(self) -> None:
-        pl = self._pipeline()
-        self.lbl_run.setText(str(self._detect_run_number(pl)))
-        self._update_job_count()
+        self._refresh_status()
 
     # ---- File browsing ----
 
@@ -451,39 +504,64 @@ class SpreadTab(QWidget):
                         seen.add((energy, images))
         return sorted(seen)
 
-    def _pipeline_counts(self) -> Dict[str, int]:
-        return {pl: len(self._jobs_for_pipeline(pl)) for pl in _PIPELINES}
-
     def _refresh_status(self) -> None:
-        """Update pipeline radio button availability, run number, and job count."""
-        counts = self._pipeline_counts()
+        """Kick off a background scan; UI is updated when the worker finishes."""
+        if not self._proc_path:
+            return
+        if self._status_worker and self._status_worker.isRunning():
+            return
+        self._status_worker = _StatusScanWorker(self._proc_path)
+        self._status_worker.finished.connect(self._apply_status_result)
+        self._status_worker.start()
 
-        # Enable / disable radio buttons based on MTZ availability.
+    def _apply_status_result(self, counts: dict, last_runs: dict) -> None:
+        """Apply the background scan results to the UI (runs on the main thread)."""
         radio_map = {
             "xia2-dials": self.rb_dials,
             "xia2-3dii":  self.rb_3dii,
             "autoPROC":   self.rb_autoproc,
         }
         for pl, rb in radio_map.items():
-            rb.setEnabled(counts[pl] > 0)
+            rb.setEnabled(counts.get(pl, 0) > 0)
 
         # If the currently selected pipeline has no jobs, switch to the first available.
         if not radio_map[self._pipeline()].isEnabled():
             for pl in ("autoPROC", "xia2-dials", "xia2-3dii"):
-                if counts[pl] > 0:
+                if counts.get(pl, 0) > 0:
                     radio_map[pl].setChecked(True)
                     break
 
-        self.lbl_run.setText(str(self._detect_run_number(self._pipeline())))
-        self._update_job_count()
-        self._refresh_analysis_run_numbers()
+        pl = self._pipeline()
+        next_run = (last_runs.get(pl, 0) or 0) + 1
+        self.lbl_run.setText(str(next_run))
 
-    def _update_job_count(self) -> None:
-        n = len(self._jobs_for_pipeline(self._pipeline()))
+        n = counts.get(pl, 0)
         if n:
             self.lbl_jobs.setText(f"{n} (MTZ found for each)")
         else:
             self.lbl_jobs.setText("0 \u2014 no MTZ files found for this pipeline")
+
+        # Update analysis spinboxes.
+        rb_spin_map = {
+            "xia2-dials": (self.an_rb_dials,    self.an_spin_dials),
+            "xia2-3dii":  (self.an_rb_3dii,     self.an_spin_3dii),
+            "autoPROC":   (self.an_rb_autoproc,  self.an_spin_autoproc),
+        }
+        for pipeline, (rb, spin) in rb_spin_map.items():
+            last = last_runs.get(pipeline, 0)
+            has_runs = last > 0
+            rb.setEnabled(has_runs)
+            spin.setEnabled(has_runs)
+            spin.setValue(last if has_runs else 1)
+
+        if not rb_spin_map[self._analysis_pipeline()][0].isEnabled():
+            for pipeline in ("autoPROC", "xia2-dials", "xia2-3dii"):
+                if rb_spin_map[pipeline][0].isEnabled():
+                    rb_spin_map[pipeline][0].setChecked(True)
+                    break
+
+        self._update_analysis_out_label()
+
 
     # ---- SSH key ----
 
@@ -717,45 +795,6 @@ phenix.refine ${{energy}}eV_${{images}}img.pdb ${{energy}}eV_${{images}}img.mtz 
             return self.an_spin_3dii.value()
         return self.an_spin_autoproc.value()
 
-    def _detect_last_run(self, pipeline: str) -> int:
-        """Return the highest existing run number for a pipeline, or 0 if none."""
-        if not self._proc_path:
-            return 0
-        prefix = _PHENIX_DIR_PREFIX[pipeline]
-        pattern = os.path.join(self._proc_path, "*eV", "*img", f"{prefix}_*")
-        max_n = 0
-        for d in glob.glob(pattern):
-            name = os.path.basename(d)
-            if name.startswith(f"{prefix}_"):
-                try:
-                    max_n = max(max_n, int(name[len(prefix) + 1:]))
-                except ValueError:
-                    pass
-        return max_n
-
-    def _refresh_analysis_run_numbers(self) -> None:
-        """Enable/disable analysis radio buttons and populate spinboxes."""
-        rb_spin_map = {
-            "xia2-dials": (self.an_rb_dials,    self.an_spin_dials),
-            "xia2-3dii":  (self.an_rb_3dii,     self.an_spin_3dii),
-            "autoPROC":   (self.an_rb_autoproc,  self.an_spin_autoproc),
-        }
-        for pipeline, (rb, spin) in rb_spin_map.items():
-            last = self._detect_last_run(pipeline)
-            has_runs = last > 0
-            rb.setEnabled(has_runs)
-            spin.setEnabled(has_runs)
-            spin.setValue(last if has_runs else 1)
-
-        # If the selected pipeline has no runs, switch to the first available.
-        if not rb_spin_map[self._analysis_pipeline()][0].isEnabled():
-            for pipeline in ("autoPROC", "xia2-dials", "xia2-3dii"):
-                if rb_spin_map[pipeline][0].isEnabled():
-                    rb_spin_map[pipeline][0].setChecked(True)
-                    break
-
-        self._update_analysis_out_label()
-
     def _analysis_out_dir(self) -> str:
         pipeline = self._analysis_pipeline()
         run      = self._analysis_run()
@@ -803,7 +842,7 @@ phenix.refine ${{energy}}eV_${{images}}img.pdb ${{energy}}eV_${{images}}img.mtz 
             results_path=self._results_path,
             pdb_model=self._pdb_path,
             anomalous_def=self._anom_path,
-            macro_cycles=self.macro_cycles_spin.value(),
+            macro_cycles=self.spin_cycles.value(),
         )
         self._analysis_worker.progress.connect(self.log_message)
         self._analysis_worker.finished.connect(self._on_phenix_finished)

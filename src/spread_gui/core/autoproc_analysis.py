@@ -526,16 +526,16 @@ def _write_html(
 <p class="meta">Processing path: {_html.escape(proc_path_str)}</p>
 <p class="meta">Statistics from: STARANISO ellipsoidal analysis (final block)</p>
 
-<h2>Summary</h2>
+<h2>Run Status</h2>
 <p>
   {n_total} run{'' if n_total == 1 else 's'} found &mdash;
   <span style="color:#1a7a3c">{n_ok} successful</span>,
   <span style="color:#c0392b">{n_fail} failed / incomplete</span>
 </p>
-{summary_table}
-
-<h2>Run Status</h2>
 {status_table}
+
+<h2>Summary</h2>
+{summary_table}
 
 <h2>Plots</h2>
 <ul class="toc">
