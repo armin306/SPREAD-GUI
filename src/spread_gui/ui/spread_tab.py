@@ -208,7 +208,6 @@ class SpreadTab(QWidget):
         self._proc_path = path
         self.proc_path_label.setText(path if path else "\u2014")
         self._refresh_status()
-        self._refresh_analysis_run_numbers()
 
     def set_context(self, project_name: str, crystal_name: str, results_path: str) -> None:
         """Called when a crystal is loaded to provide naming and output path context."""
