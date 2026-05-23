@@ -17,6 +17,7 @@ Layout
 from __future__ import annotations
 
 import os
+import webbrowser
 from pathlib import Path
 from typing import Optional
 
@@ -40,6 +41,60 @@ from PyQt6.QtWidgets import (
 )
 
 from spread_gui.services.database import Crystal, Project, ProjectDB
+
+
+# ---------------------------------------------------------------------------
+# Edit-Project sub-dialog
+# ---------------------------------------------------------------------------
+
+class _EditProjectDialog(QDialog):
+    """Edit a project's name and results path."""
+
+    def __init__(self, project, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Edit Project")
+        self.setMinimumWidth(520)
+
+        g = QGridLayout(self)
+        g.setColumnStretch(1, 1)
+
+        g.addWidget(QLabel("Project name:"), 0, 0)
+        self.name_edit = QLineEdit(project.name)
+        g.addWidget(self.name_edit, 0, 1, 1, 2)
+
+        g.addWidget(QLabel("Results path:"), 1, 0)
+        self.results_path_edit = QLineEdit(project.results_path)
+        g.addWidget(self.results_path_edit, 1, 1)
+        btn_browse = QPushButton("Browse\u2026")
+        btn_browse.clicked.connect(self._browse)
+        g.addWidget(btn_browse, 1, 2)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self._on_accept)
+        buttons.rejected.connect(self.reject)
+        g.addWidget(buttons, 2, 0, 1, 3)
+
+    def _browse(self) -> None:
+        start = self.results_path_edit.text() or str(Path.home())
+        d = QFileDialog.getExistingDirectory(self, "Select results directory", start)
+        if d:
+            self.results_path_edit.setText(d)
+
+    def _on_accept(self) -> None:
+        if not self.name_edit.text().strip():
+            QMessageBox.warning(self, "Missing name", "Please enter a project name.")
+            return
+        self.accept()
+
+    @property
+    def project_name(self) -> str:
+        return self.name_edit.text().strip()
+
+    @property
+    def results_path(self) -> str:
+        return self.results_path_edit.text().strip()
 
 
 # ---------------------------------------------------------------------------
@@ -169,11 +224,17 @@ class ManageProjectsDialog(QDialog):
         self.proj_list.currentItemChanged.connect(self._on_project_selected)
         pv.addWidget(self.proj_list)
         pb = QHBoxLayout()
-        self.btn_new_project = QPushButton("+ New")
-        self.btn_del_project = QPushButton("\u2715 Delete")
+        self.btn_new_project    = QPushButton("+ New")
+        self.btn_edit_project   = QPushButton("Edit\u2026")
+        self.btn_del_project    = QPushButton("\u2715 Delete")
+        self.btn_open_results   = QPushButton("Open Results")
+        self.btn_edit_project.setEnabled(False)
         self.btn_del_project.setEnabled(False)
+        self.btn_open_results.setEnabled(False)
         pb.addWidget(self.btn_new_project)
+        pb.addWidget(self.btn_edit_project)
         pb.addWidget(self.btn_del_project)
+        pb.addWidget(self.btn_open_results)
         pb.addStretch(1)
         pv.addLayout(pb)
         panes.addWidget(proj_box, 1)
@@ -218,7 +279,9 @@ class ManageProjectsDialog(QDialog):
 
         # Signals
         self.btn_new_project.clicked.connect(self._new_project)
+        self.btn_edit_project.clicked.connect(self._edit_project)
         self.btn_del_project.clicked.connect(self._delete_project)
+        self.btn_open_results.clicked.connect(self._open_results)
         self.btn_new_crystal.clicked.connect(self._new_crystal)
         self.btn_del_crystal.clicked.connect(self._delete_crystal)
         self.btn_sg_cell.clicked.connect(self._set_sg_cell)
@@ -296,8 +359,11 @@ class ManageProjectsDialog(QDialog):
     def _on_project_selected(self) -> None:
         p = self._selected_project()
         has_p = p is not None
+        self.btn_edit_project.setEnabled(has_p)
         self.btn_del_project.setEnabled(has_p)
         self.btn_new_crystal.setEnabled(has_p)
+        has_results = has_p and bool(p.results_path) and Path(p.results_path, "index.html").exists()
+        self.btn_open_results.setEnabled(has_results)
         self.cryst_list.clear()
         self.btn_del_crystal.setEnabled(False)
         self.btn_load.setEnabled(False)
@@ -333,6 +399,34 @@ class ManageProjectsDialog(QDialog):
             QMessageBox.warning(self, "Error", str(exc))
             return
         self._refresh_projects(select_id=p.id)
+
+    def _edit_project(self) -> None:
+        p = self._selected_project()
+        if p is None:
+            return
+        dlg = _EditProjectDialog(p, self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        try:
+            self._db.update_project(p.id, dlg.project_name, dlg.results_path)
+        except Exception as exc:
+            QMessageBox.warning(self, "Error", str(exc))
+            return
+        self._refresh_projects(select_id=p.id)
+
+    def _open_results(self) -> None:
+        p = self._selected_project()
+        if p is None or not p.results_path:
+            return
+        index = Path(p.results_path) / "index.html"
+        if index.exists():
+            webbrowser.open(f"file://{index}")
+        else:
+            QMessageBox.information(
+                self, "No results yet",
+                f"No project index found at:\n{index}\n\n"
+                "Run an analysis first to generate the results page.",
+            )
 
     def _delete_project(self) -> None:
         p = self._selected_project()

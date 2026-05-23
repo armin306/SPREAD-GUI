@@ -31,11 +31,12 @@ def _now() -> str:
 # ---------------------------------------------------------------------------
 
 class Project:
-    __slots__ = ("id", "name", "created_at")
+    __slots__ = ("id", "name", "results_path", "created_at")
 
-    def __init__(self, id_: int, name: str, created_at: str) -> None:
+    def __init__(self, id_: int, name: str, results_path: str, created_at: str) -> None:
         self.id = id_
         self.name = name
+        self.results_path = results_path
         self.created_at = created_at
 
     def __repr__(self) -> str:  # pragma: no cover
@@ -70,9 +71,10 @@ _SCHEMA = """
 PRAGMA foreign_keys = ON;
 
 CREATE TABLE IF NOT EXISTS projects (
-    id         INTEGER PRIMARY KEY AUTOINCREMENT,
-    name       TEXT    NOT NULL UNIQUE,
-    created_at TEXT    NOT NULL
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    name         TEXT    NOT NULL UNIQUE,
+    results_path TEXT    NOT NULL DEFAULT '',
+    created_at   TEXT    NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS crystals (
@@ -140,23 +142,46 @@ class ProjectDB:
     def _init(self) -> None:
         with self._tx() as con:
             con.executescript(_SCHEMA)
+            # Migration: add results_path to older databases that lack the column.
+            try:
+                con.execute("ALTER TABLE projects ADD COLUMN results_path TEXT NOT NULL DEFAULT ''")
+            except sqlite3.OperationalError:
+                pass  # column already exists
 
     # ---- projects ----
 
     def get_projects(self) -> list[Project]:
         with self._connect() as con:
             rows = con.execute(
-                "SELECT id, name, created_at FROM projects ORDER BY name"
+                "SELECT id, name, results_path, created_at FROM projects ORDER BY name"
             ).fetchall()
-        return [Project(r["id"], r["name"], r["created_at"]) for r in rows]
+        return [Project(r["id"], r["name"], r["results_path"], r["created_at"]) for r in rows]
 
-    def create_project(self, name: str) -> Project:
+    def get_project(self, project_id: int) -> Optional[Project]:
+        with self._connect() as con:
+            row = con.execute(
+                "SELECT id, name, results_path, created_at FROM projects WHERE id=?",
+                (project_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return Project(row["id"], row["name"], row["results_path"], row["created_at"])
+
+    def create_project(self, name: str, results_path: str = "") -> Project:
         now = _now()
         with self._tx() as con:
             cur = con.execute(
-                "INSERT INTO projects (name, created_at) VALUES (?, ?)", (name, now)
+                "INSERT INTO projects (name, results_path, created_at) VALUES (?, ?, ?)",
+                (name, results_path, now),
             )
-            return Project(cur.lastrowid, name, now)
+            return Project(cur.lastrowid, name, results_path, now)
+
+    def update_project(self, project_id: int, name: str, results_path: str) -> None:
+        with self._tx() as con:
+            con.execute(
+                "UPDATE projects SET name=?, results_path=? WHERE id=?",
+                (name, results_path, project_id),
+            )
 
     def rename_project(self, project_id: int, new_name: str) -> None:
         with self._tx() as con:
@@ -238,6 +263,19 @@ class ProjectDB:
         existing = self.get_crystal_settings(crystal_id)
         existing.update(patch)
         self.update_crystal(crystal_id, existing)
+
+    def get_project_for_crystal(self, crystal_id: int) -> Optional[Project]:
+        """Return the Project that owns *crystal_id*, or None if not found."""
+        with self._connect() as con:
+            row = con.execute(
+                "SELECT p.id, p.name, p.results_path, p.created_at "
+                "FROM crystals c JOIN projects p ON c.project_id = p.id "
+                "WHERE c.id=?",
+                (crystal_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return Project(row["id"], row["name"], row["results_path"], row["created_at"])
 
     def get_crystal_info(self, crystal_id: int) -> tuple[str, str]:
         """Return (project_name, crystal_name) for the given crystal id."""

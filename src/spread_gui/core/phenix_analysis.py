@@ -2,39 +2,48 @@
 Generate an HTML report for phenix.refine anomalous refinement results.
 
 Plots f' and f'' versus energy:
-  - Overview: one subplot per anomalous group, one line per wedge size
-  - Per-wedge sections: f' and f'' side-by-side, one line per group
+  - Summary: one figure per anomalous group (f' and f'' side-by-side), one line per wedge
+  - Per-wedge: f' and f'' side-by-side, one line per group
+  - R-work / R-free vs energy: one line per wedge size
+
+All figures are saved as PNG files in plots/; underlying data as CSV in data/.
 """
 from __future__ import annotations
 
-import base64
-import io
+import csv
+import html as _html
+from datetime import datetime
 from pathlib import Path
 from typing import Callable
+
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+import matplotlib.cm as cm
 
 from spread_gui.core.phenix_parser import PhenixResult, group_short_label
 
 
-def _fig_to_b64(fig) -> str:
-    buf = io.BytesIO()
-    fig.savefig(buf, format="png", bbox_inches="tight", dpi=100)
-    buf.seek(0)
-    return base64.b64encode(buf.read()).decode("ascii")
-
+# ---------------------------------------------------------------------------
+# Figure helpers
+# ---------------------------------------------------------------------------
 
 def _group_summary_fig(
     results: dict[tuple[int, int], PhenixResult],
     energies: list[int],
     wedges: list[int],
     sel: str,
+    plots_dir: Path,
+    data_dir: Path,
+    fname_stem: str,
 ) -> str:
-    """Return an HTML <img> tag for one anomalous group: f' and f'' side-by-side, one line per wedge."""
-    import matplotlib.pyplot as plt
-    import matplotlib.cm as cm
-
+    """Save f'/f'' summary PNG + CSV for one anomalous group. Returns PNG filename."""
     colors = cm.tab10.colors
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(11, 4))
     fig.suptitle(group_short_label(sel))
+
+    csv_header = ["energy_eV"]
+    csv_rows: dict[int, list] = {e: [e] for e in energies}
 
     for wi, images in enumerate(sorted(wedges)):
         xs, fps, fdps = [], [], []
@@ -50,8 +59,18 @@ def _group_summary_fig(
                     break
         c = colors[wi % len(colors)]
         if xs:
-            ax1.plot(xs, fps, marker="o", color=c, label=f"{images} img")
+            ax1.plot(xs, fps,  marker="o", color=c, label=f"{images} img")
             ax2.plot(xs, fdps, marker="o", color=c, label=f"{images} img")
+
+        # CSV columns for this wedge
+        csv_header += [f"{images}img_f_prime", f"{images}img_f_double_prime"]
+        fp_map  = dict(zip(xs, fps))
+        fdp_map = dict(zip(xs, fdps))
+        for e in energies:
+            csv_rows[e] += [
+                f"{fp_map[e]:.6g}"  if e in fp_map  else "",
+                f"{fdp_map[e]:.6g}" if e in fdp_map else "",
+            ]
 
     for ax, lbl in ((ax1, "f'"), (ax2, "f''")):
         ax.set_xlabel("Energy (eV)")
@@ -63,9 +82,18 @@ def _group_summary_fig(
                   borderaxespad=0, fontsize="small")
 
     plt.tight_layout()
-    tag = f'<img src="data:image/png;base64,{_fig_to_b64(fig)}" style="max-width:100%;">'
+    png_name = f"{fname_stem}.png"
+    fig.savefig(plots_dir / png_name, dpi=100, bbox_inches="tight")
     plt.close(fig)
-    return tag
+
+    # Write CSV
+    with open(data_dir / f"{fname_stem}.csv", "w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(csv_header)
+        for e in energies:
+            writer.writerow(csv_rows[e])
+
+    return png_name
 
 
 def _wedge_fig(
@@ -73,14 +101,21 @@ def _wedge_fig(
     energies: list[int],
     images: int,
     groups: list[str],
+    plots_dir: Path,
+    data_dir: Path,
+    fname_stem: str,
 ) -> str:
-    """Return an HTML <img> tag with f' and f'' side-by-side for one wedge."""
-    import matplotlib.pyplot as plt
-    import matplotlib.cm as cm
-
+    """Save f'/f'' per-wedge PNG + CSV. Returns PNG filename."""
     colors = cm.tab10.colors
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(11, 4))
     fig.suptitle(f"{images} images")
+
+    # CSV: one row per energy
+    csv_header = ["energy_eV", "r_work", "r_free"]
+    for sel in groups:
+        lbl = group_short_label(sel)
+        csv_header += [f"{lbl}_f_prime", f"{lbl}_f_double_prime"]
+    csv_rows: dict[int, list] = {e: [e] for e in energies}
 
     for gi, sel in enumerate(groups):
         label = group_short_label(sel)
@@ -97,8 +132,22 @@ def _wedge_fig(
                     break
         c = colors[gi % len(colors)]
         if xs:
-            ax1.plot(xs, fps, marker="o", color=c, label=label)
+            ax1.plot(xs, fps,  marker="o", color=c, label=label)
             ax2.plot(xs, fdps, marker="o", color=c, label=label)
+        fp_map  = dict(zip(xs, fps))
+        fdp_map = dict(zip(xs, fdps))
+        for e in energies:
+            csv_rows[e] += [
+                f"{fp_map[e]:.6g}"  if e in fp_map  else "",
+                f"{fdp_map[e]:.6g}" if e in fdp_map else "",
+            ]
+
+    # Insert Rwork/Rfree into CSV rows (position 1 and 2)
+    for e in energies:
+        res = results.get((e, images))
+        rw = f"{res.r_work_final:.6g}" if (res and res.r_work_final is not None) else ""
+        rf = f"{res.r_free_final:.6g}" if (res and res.r_free_final is not None) else ""
+        csv_rows[e] = [e, rw, rf] + csv_rows[e][1:]
 
     for ax, lbl in ((ax1, "f'"), (ax2, "f''")):
         ax.set_xlabel("Energy (eV)")
@@ -110,9 +159,81 @@ def _wedge_fig(
                   borderaxespad=0, fontsize="small")
 
     plt.tight_layout()
-    tag = f'<img src="data:image/png;base64,{_fig_to_b64(fig)}" style="max-width:100%;">'
+    png_name = f"{fname_stem}.png"
+    fig.savefig(plots_dir / png_name, dpi=100, bbox_inches="tight")
     plt.close(fig)
-    return tag
+
+    with open(data_dir / f"{fname_stem}.csv", "w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(csv_header)
+        for e in energies:
+            writer.writerow(csv_rows[e])
+
+    return png_name
+
+
+def _rwork_rfree_fig(
+    results: dict[tuple[int, int], PhenixResult],
+    energies: list[int],
+    wedges: list[int],
+    plots_dir: Path,
+    data_dir: Path,
+) -> str:
+    """Save R-work / R-free vs energy PNG + CSV. Returns PNG filename."""
+    colors = cm.tab10.colors
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(11, 4))
+    fig.suptitle("R-work and R-free vs Energy")
+
+    csv_header = ["energy_eV"]
+    csv_rows: dict[int, list] = {e: [e] for e in energies}
+
+    for wi, images in enumerate(sorted(wedges)):
+        xs_rw, ys_rw, xs_rf, ys_rf = [], [], [], []
+        for energy in sorted(energies):
+            res = results.get((energy, images))
+            if res is None:
+                continue
+            if res.r_work_final is not None:
+                xs_rw.append(energy)
+                ys_rw.append(res.r_work_final)
+            if res.r_free_final is not None:
+                xs_rf.append(energy)
+                ys_rf.append(res.r_free_final)
+        c = colors[wi % len(colors)]
+        if xs_rw:
+            ax1.plot(xs_rw, ys_rw, marker="o", color=c, label=f"{images} img")
+        if xs_rf:
+            ax2.plot(xs_rf, ys_rf, marker="o", color=c, label=f"{images} img")
+
+        csv_header += [f"{images}img_r_work", f"{images}img_r_free"]
+        rw_map = dict(zip(xs_rw, ys_rw))
+        rf_map = dict(zip(xs_rf, ys_rf))
+        for e in energies:
+            csv_rows[e] += [
+                f"{rw_map[e]:.6g}" if e in rw_map else "",
+                f"{rf_map[e]:.6g}" if e in rf_map else "",
+            ]
+
+    for ax, lbl in ((ax1, "R-work"), (ax2, "R-free")):
+        ax.set_xlabel("Energy (eV)")
+        ax.set_ylabel(lbl)
+        ax.set_title(f"{lbl} vs Energy")
+        ax.set_xticks(sorted(energies))
+        ax.tick_params(axis="x", rotation=45)
+        ax.legend(loc="upper left", bbox_to_anchor=(1.02, 1),
+                  borderaxespad=0, fontsize="small")
+
+    plt.tight_layout()
+    fig.savefig(plots_dir / "rwork_rfree.png", dpi=100, bbox_inches="tight")
+    plt.close(fig)
+
+    with open(data_dir / "rwork_rfree.csv", "w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(csv_header)
+        for e in energies:
+            writer.writerow(csv_rows[e])
+
+    return "rwork_rfree.png"
 
 
 def _summary_table(
@@ -155,6 +276,10 @@ def _summary_table(
     )
 
 
+# ---------------------------------------------------------------------------
+# Main entry point
+# ---------------------------------------------------------------------------
+
 def generate_report(
     results: dict[tuple[int, int], PhenixResult],
     out_dir: Path,
@@ -162,11 +287,16 @@ def generate_report(
     proc_path: str,
     run: int,
     progress: Callable[[str], None] | None = None,
+    pdb_model: str = "",
+    anomalous_def: str = "",
+    macro_cycles: int = 0,
+    project_name: str = "",
+    crystal_name: str = "",
 ) -> str:
     """
-    Generate an HTML report from *results* and write it to *out_dir*.
+    Generate PNG plots, CSV data files, and an HTML report inside *out_dir*.
 
-    Returns the path to the HTML file as a string.
+    Returns the path to index.html as a string.
     Raises ValueError if *results* is empty.
     """
     if progress is None:
@@ -178,6 +308,11 @@ def generate_report(
             "Make sure the correct pipeline and run number are selected and "
             "that the refinement jobs have completed."
         )
+
+    plots_dir = out_dir / "plots"
+    data_dir  = out_dir / "data"
+    plots_dir.mkdir(parents=True, exist_ok=True)
+    data_dir.mkdir(parents=True, exist_ok=True)
 
     energies = sorted({e for e, _ in results})
     wedges   = sorted({i for _, i in results})
@@ -192,50 +327,136 @@ def generate_report(
                 groups.append(g.selection)
                 seen.add(g.selection)
 
+    # ---- Summary plots (one per group) ----
     progress("Generating summary plots…")
     group_summary_sections: list[str] = []
     for sel in groups:
         label = group_short_label(sel)
-        img_tag = _group_summary_fig(results, energies, wedges, sel)
+        fname_stem = f"summary_{label}"
+        png = _group_summary_fig(results, energies, wedges, sel,
+                                 plots_dir, data_dir, fname_stem)
         group_summary_sections.append(
-            f"<h2>Summary \u2014 {label} (all wedges)</h2>\n{img_tag}"
+            f'<h2 id="{_html.escape(fname_stem)}">Summary \u2014 {_html.escape(label)} (all wedges)</h2>\n'
+            f'<a href="plots/{png}"><img src="plots/{png}" alt="Summary {label}"></a>\n'
+            f'<p><a href="data/{fname_stem}.csv">Download CSV</a></p>'
         )
 
+    # ---- R-work / R-free vs energy ----
+    progress("Generating R-work/R-free plot…")
+    rr_png = _rwork_rfree_fig(results, energies, wedges, plots_dir, data_dir)
+    rr_section = (
+        '<h2 id="rwork_rfree">R-work and R-free vs Energy</h2>\n'
+        f'<a href="plots/{rr_png}"><img src="plots/{rr_png}" alt="Rwork Rfree"></a>\n'
+        '<p><a href="data/rwork_rfree.csv">Download CSV</a></p>'
+    )
+
+    # ---- Per-wedge plots ----
     wedge_sections: list[str] = []
     for images in wedges:
         progress(f"Generating wedge plot: {images} images\u2026")
-        img_tag = _wedge_fig(results, energies, images, groups)
-        table   = _summary_table(results, energies, images, groups)
+        fname_stem = f"wedge_{images}img"
+        png   = _wedge_fig(results, energies, images, groups,
+                           plots_dir, data_dir, fname_stem)
+        table = _summary_table(results, energies, images, groups)
         wedge_sections.append(
-            f"<h2>{images} images</h2>\n{img_tag}\n{table}"
+            f'<h2 id="{fname_stem}">{images} images</h2>\n'
+            f'<a href="plots/{png}"><img src="plots/{png}" alt="{images} images"></a>\n'
+            f'<p><a href="data/{fname_stem}.csv">Download CSV</a></p>\n'
+            + table
         )
 
+    # ---- HTML ----
     progress("Writing HTML report\u2026")
     out_dir.mkdir(parents=True, exist_ok=True)
-    html_path = out_dir / "phenix_analysis.html"
+    html_path = out_dir / "index.html"
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    # Breadcrumb: out_dir = {results_path}/{crystal}/spread/{pipeline}/run_N
+    crystal_index = out_dir.parent.parent.parent / "index.html"
+    proj_index    = crystal_index.parent / "index.html"
+    breadcrumb_parts = []
+    if proj_index.exists():
+        breadcrumb_parts.append(f'<a href="../../../index.html">{_html.escape(project_name)}</a>')
+    elif project_name:
+        breadcrumb_parts.append(_html.escape(project_name))
+    if crystal_index.exists():
+        breadcrumb_parts.append(f'<a href="../../index.html">{_html.escape(crystal_name)}</a>')
+    elif crystal_name:
+        breadcrumb_parts.append(_html.escape(crystal_name))
+    breadcrumb_parts.append(f"SPREAD {_html.escape(pipeline)} \u2014 {out_dir.name}")
+    breadcrumb = " / ".join(breadcrumb_parts)
+
+    # Table of contents
+    toc_items = [f'<li><a href="#{group_short_label(s)}">Summary {group_short_label(s)}</a></li>' for s in groups]
+    toc_items.append('<li><a href="#rwork_rfree">R-work / R-free</a></li>')
+    toc_items += [f'<li><a href="#wedge_{w}img">{w} images</a></li>' for w in wedges]
+    toc = "<ul>" + "".join(toc_items) + "</ul>"
+
+    # Metadata rows
+    meta_rows = []
+    if pdb_model:
+        meta_rows.append(f"<tr><td>PDB model</td><td>{_html.escape(pdb_model)}</td></tr>")
+    if anomalous_def:
+        meta_rows.append(f"<tr><td>Anomalous groups</td><td>{_html.escape(anomalous_def)}</td></tr>")
+    if macro_cycles:
+        meta_rows.append(f"<tr><td>Macro cycles</td><td>{macro_cycles}</td></tr>")
+    meta_rows.append(f"<tr><td>Pipeline</td><td>{_html.escape(pipeline)}</td></tr>")
+    meta_rows.append(f"<tr><td>Run</td><td>{run}</td></tr>")
+    meta_rows.append(f"<tr><td>Processing path</td><td>{_html.escape(proc_path)}</td></tr>")
+    meta_table = (
+        "<table style='border-collapse:collapse;font-size:13px;margin-bottom:16px;'>"
+        + "".join(
+            f"<tr><th style='text-align:left;padding:3px 12px 3px 0;color:#555;'>{r.split('<td>')[1].split('</td>')[0]}</th>"
+            f"<td style='padding:3px 0;'>{r.split('</td><td>')[1].split('</td>')[0]}</td></tr>"
+            for r in meta_rows
+        )
+        + "</table>"
+    )
+    # simpler approach:
+    meta_lines = []
+    if pdb_model:
+        meta_lines.append(f"<b>PDB model:</b> {_html.escape(pdb_model)}")
+    if anomalous_def:
+        meta_lines.append(f"<b>Anomalous groups:</b> {_html.escape(anomalous_def)}")
+    if macro_cycles:
+        meta_lines.append(f"<b>Macro cycles:</b> {macro_cycles}")
+    meta_lines.append(f"<b>Pipeline:</b> {_html.escape(pipeline)}")
+    meta_lines.append(f"<b>Run:</b> {run}")
+    meta_lines.append(f"<b>Processing path:</b> {_html.escape(proc_path)}")
+    meta_block = " &nbsp;|&nbsp; ".join(meta_lines)
 
     html = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>Phenix Analysis \u2014 {pipeline} run {run}</title>
+<title>SPREAD Analysis \u2014 {_html.escape(pipeline)} run {run}</title>
 <style>
-body {{ font-family: sans-serif; max-width: 1600px; margin: 0 auto; padding: 16px; }}
-h1 {{ color: #2c3e50; }}
-h2 {{ color: #34495e; border-bottom: 1px solid #ccc; padding-bottom: 4px; margin-top: 32px; }}
-img {{ display: block; margin-bottom: 12px; }}
-table {{ margin-bottom: 12px; }}
+body {{ font-family: Arial, sans-serif; max-width: 1600px; margin: 0 auto; padding: 16px; color: #222; }}
+h1 {{ color: #1a4a8a; }}
+h2 {{ color: #2a6ab0; border-bottom: 1px solid #ccc; padding-bottom: 4px; margin-top: 32px; }}
+.meta {{ color: #666; font-size: 13px; margin-bottom: 8px; }}
+.breadcrumb {{ font-size: 13px; color: #888; margin-bottom: 12px; }}
+.breadcrumb a {{ color: #2a6ab0; text-decoration: none; }}
+.breadcrumb a:hover {{ text-decoration: underline; }}
+img {{ display: block; margin-bottom: 12px; border: 1px solid #ddd; max-width: 100%; }}
+table {{ margin-bottom: 12px; border-collapse: collapse; font-size: 13px; }}
+th, td {{ border: 1px solid #bbb; padding: 4px 10px; }}
+th {{ background: #e8eef8; }}
+a {{ color: #1a4a8a; }}
 </style>
 </head>
 <body>
-<h1>Phenix Anomalous Refinement Analysis</h1>
-<p>
-  <b>Pipeline:</b> {pipeline} &nbsp;
-  <b>Run:</b> {run} &nbsp;
-  <b>Path:</b> {proc_path}
-</p>
+<p class="breadcrumb">{breadcrumb}</p>
+<h1>SPREAD Anomalous Refinement Analysis</h1>
+<p class="meta">{meta_block}</p>
+<p class="meta">Generated: {timestamp}</p>
+
+<h2>Contents</h2>
+{toc}
 
 {"".join(group_summary_sections)}
+
+{rr_section}
 
 {"".join(wedge_sections)}
 </body>

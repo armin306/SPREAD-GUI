@@ -10,7 +10,6 @@ from PyQt6.QtWidgets import (
     QDialog,
     QGroupBox,
     QHBoxLayout,
-    QInputDialog,
     QLabel,
     QMessageBox,
     QPushButton,
@@ -19,67 +18,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-# xia2_analysis imports matplotlib, which is slow to load.  Defer the import
-# to inside the worker thread so it doesn't block the main window from painting.
-
 _CONFIG_PATH = Path.home() / ".config" / "spread_gui" / "settings.ini"
-
-
-# ---------------------------------------------------------------------------
-# Existing-results dialog
-# ---------------------------------------------------------------------------
-
-class _ExistingResultsDialog(QDialog):
-    """
-    Shown when the default output directory already exists.
-    Three choices:
-      SHOW      — open the existing HTML in the browser
-      OVERWRITE — re-run and overwrite the existing directory
-      NEW_DIR   — re-run into a user-chosen directory
-    """
-
-    SHOW      = "show"
-    OVERWRITE = "overwrite"
-    NEW_DIR   = "new_dir"
-
-    def __init__(self, out_dir: Path, parent: QWidget | None = None) -> None:
-        super().__init__(parent)
-        self.setWindowTitle("Analysis results already exist")
-        self.choice: str | None = None
-
-        layout = QVBoxLayout(self)
-        layout.setSpacing(10)
-
-        msg = QLabel(
-            f"Analysis results already exist in:\n<b>{out_dir}</b>"
-        )
-        msg.setTextFormat(Qt.TextFormat.RichText)
-        msg.setWordWrap(True)
-        layout.addWidget(msg)
-
-        def _btn(label: str, description: str, choice: str) -> None:
-            b = QPushButton(label)
-            b.setToolTip(description)
-            b.clicked.connect(lambda: self._pick(choice))
-            layout.addWidget(b)
-
-        _btn("Show existing results",
-             "Open the existing HTML report in the browser without re-running.",
-             self.SHOW)
-        _btn("Re-run and overwrite",
-             "Delete the existing results and run the analysis again in the same directory.",
-             self.OVERWRITE)
-        _btn("Re-run in a new directory",
-             "Keep the existing results and write the new analysis to a different directory.",
-             self.NEW_DIR)
-
-        cancel = QPushButton("Cancel")
-        cancel.clicked.connect(self.reject)
-        layout.addWidget(cancel)
-
-    def _pick(self, choice: str) -> None:
-        self.choice = choice
-        self.accept()
 
 
 # ---------------------------------------------------------------------------
@@ -91,11 +30,22 @@ class _AnalysisWorker(QThread):
     finished = pyqtSignal(str)   # HTML path on success
     error    = pyqtSignal(str)   # error message on failure
 
-    def __init__(self, proc_path: str, pipeline: str, out_dir: str) -> None:
+    def __init__(
+        self,
+        proc_path: str,
+        pipeline: str,
+        out_dir: str,
+        project_name: str = "",
+        crystal_name: str = "",
+        results_path: str = "",
+    ) -> None:
         super().__init__()
-        self._proc_path = proc_path
-        self._pipeline  = pipeline
-        self._out_dir   = out_dir
+        self._proc_path    = proc_path
+        self._pipeline     = pipeline
+        self._out_dir      = out_dir
+        self._project_name = project_name
+        self._crystal_name = crystal_name
+        self._results_path = results_path
 
     def run(self) -> None:
         try:
@@ -110,7 +60,21 @@ class _AnalysisWorker(QThread):
                 self._pipeline,
                 self._proc_path,
                 self.progress.emit,
+                project_name=self._project_name,
+                crystal_name=self._crystal_name,
+                results_path=self._results_path,
             )
+            # Regenerate crystal and project index pages
+            if self._results_path and self._crystal_name:
+                try:
+                    from spread_gui.core.report_index import (
+                        generate_crystal_index, generate_project_index,
+                    )
+                    crystal_dir = Path(self._results_path) / self._crystal_name
+                    generate_crystal_index(crystal_dir, self._project_name, self._crystal_name)
+                    generate_project_index(Path(self._results_path), self._project_name)
+                except Exception as e:
+                    self.progress.emit(f"Warning: could not update index pages: {e}")
             self.finished.emit(html_path)
         except Exception as exc:
             self.error.emit(str(exc))
@@ -125,8 +89,11 @@ class AnalysisTab(QWidget):
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self._worker: _AnalysisWorker | None = None
-        self._proc_path: str = ""
+        self._worker:       _AnalysisWorker | None = None
+        self._proc_path:    str = ""
+        self._results_path: str = ""
+        self._project_name: str = ""
+        self._crystal_name: str = ""
         self._build_ui()
         self._load_settings()
 
@@ -189,12 +156,39 @@ class AnalysisTab(QWidget):
         return "xia2-dials" if self.rb_dials.isChecked() else "xia2-3dii"
 
     def set_proc_path(self, path: str) -> None:
-        """Called by MainWindow when the loaded crystal changes."""
         self._proc_path = path
         self.proc_path_label.setText(path if path else "\u2014")
         self._update_out_label()
 
+    def set_context(self, project_name: str, crystal_name: str, results_path: str) -> None:
+        """Called when a crystal is loaded to provide naming and output path context."""
+        self._project_name = project_name
+        self._crystal_name = crystal_name
+        self._results_path = results_path
+        self._update_out_label()
+
+    def _next_run_dir(self) -> Path | None:
+        """Return the next run_N directory under the results tree, or None if unconfigured."""
+        if not (self._results_path and self._crystal_name):
+            return None
+        base = (
+            Path(self._results_path)
+            / self._crystal_name
+            / "processing"
+            / self._pipeline()
+        )
+        existing = [
+            d for d in base.iterdir()
+            if d.is_dir() and d.name.startswith("run_") and d.name[4:].isdigit()
+        ] if base.is_dir() else []
+        run_n = max((int(d.name[4:]) for d in existing), default=0) + 1
+        return base / f"run_{run_n}"
+
     def _default_out_dir(self) -> str:
+        nd = self._next_run_dir()
+        if nd is not None:
+            return str(nd)
+        # Fall back to proc_path-relative location if results_path not configured
         if not self._proc_path:
             return ""
         return str(Path(self._proc_path) / "results" / self._pipeline())
@@ -208,7 +202,6 @@ class AnalysisTab(QWidget):
     # ---- Settings ----
 
     def _load_settings(self) -> None:
-        """Pre-populate pipeline selection from shared settings.ini."""
         cfg = configparser.ConfigParser()
         if not _CONFIG_PATH.exists():
             return
@@ -238,10 +231,15 @@ class AnalysisTab(QWidget):
         if not os.path.isdir(proc_path):
             QMessageBox.warning(self, "Invalid path", f"Directory not found:\n{proc_path}")
             return
+        if not self._results_path:
+            QMessageBox.warning(
+                self, "No results path",
+                "No results path configured for this project.\n\n"
+                "Open Manage Projects, select the project, click Edit, and set a Results path.",
+            )
+            return
 
-        out_dir = self._resolve_out_dir(proc_path)
-        if out_dir is None:
-            return  # user cancelled
+        out_dir = Path(self._default_out_dir())
 
         self.btn_run.setEnabled(False)
         self._log("--- Analyse Processing ---")
@@ -250,81 +248,23 @@ class AnalysisTab(QWidget):
         self._log(f"Output directory: {out_dir}")
         self._log("")
 
-        self._worker = _AnalysisWorker(proc_path, self._pipeline(), str(out_dir))
+        self._worker = _AnalysisWorker(
+            proc_path, self._pipeline(), str(out_dir),
+            project_name=self._project_name,
+            crystal_name=self._crystal_name,
+            results_path=self._results_path,
+        )
         self._worker.progress.connect(self._log)
         self._worker.finished.connect(self._on_finished)
         self._worker.error.connect(self._on_error)
         self._worker.start()
-
-    def _resolve_out_dir(self, proc_path: str) -> Path | None:
-        """
-        Determine the output directory.
-
-        If the default doesn't exist yet, return it directly.
-        If it already exists, ask the user via a three-option dialog:
-          • Show results  → open existing HTML, return None (no re-run)
-          • Overwrite     → confirm, return the same directory
-          • New directory → prompt for a name, return that directory
-        Returns None to abort (user cancelled, or "show results" was chosen).
-        """
-        out_dir = Path(self._default_out_dir())
-
-        if not out_dir.exists():
-            return out_dir
-
-        dlg = _ExistingResultsDialog(out_dir, self)
-        if dlg.exec() != QDialog.DialogCode.Accepted or dlg.choice is None:
-            return None
-
-        if dlg.choice == _ExistingResultsDialog.SHOW:
-            html = out_dir / "index.html"
-            if html.exists():
-                webbrowser.open(f"file://{html}")
-            else:
-                QMessageBox.warning(
-                    self, "No report found",
-                    f"index.html not found in:\n{out_dir}\n\n"
-                    "The previous run may have failed. Use 'Re-run' to generate a new report.",
-                )
-            return None
-
-        if dlg.choice == _ExistingResultsDialog.OVERWRITE:
-            ans = QMessageBox.question(
-                self, "Overwrite existing results?",
-                f"All files in:\n{out_dir}\nwill be replaced. Continue?",
-            )
-            if ans != QMessageBox.StandardButton.Yes:
-                return None
-            return out_dir
-
-        # NEW_DIR — ask for a name, loop until it's free
-        suggestion = self._pipeline() + "-2"
-        while True:
-            name, ok = QInputDialog.getText(
-                self,
-                "Choose a new output directory",
-                "Enter a sub-directory name under results/:",
-                text=suggestion,
-            )
-            if not ok:
-                return None
-            name = name.strip()
-            if not name:
-                continue
-            candidate = Path(proc_path) / "results" / name
-            if not candidate.exists():
-                return candidate
-            QMessageBox.warning(
-                self, "Already exists",
-                f"\u2018{candidate}\u2019 also exists. Please choose a different name.",
-            )
-            suggestion = name + "-2"
 
     # ---- Worker callbacks ----
 
     def _on_finished(self, html_path: str) -> None:
         self._log("")
         self._log(f"Done. Opening report in browser: {html_path}")
+        self._update_out_label()   # advance to next run number for display
         self.btn_run.setEnabled(True)
         webbrowser.open(f"file://{html_path}")
 

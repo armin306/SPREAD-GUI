@@ -73,12 +73,30 @@ class _PhenixAnalysisWorker(QThread):
     finished = pyqtSignal(str)   # HTML path
     error    = pyqtSignal(str)   # error message
 
-    def __init__(self, proc_path: str, pipeline: str, run: int, out_dir: str) -> None:
+    def __init__(
+        self,
+        proc_path: str,
+        pipeline: str,
+        run: int,
+        out_dir: str,
+        project_name: str = "",
+        crystal_name: str = "",
+        results_path: str = "",
+        pdb_model: str = "",
+        anomalous_def: str = "",
+        macro_cycles: int = 0,
+    ) -> None:
         super().__init__()
-        self._proc_path = proc_path
-        self._pipeline  = pipeline
-        self._run       = run
-        self._out_dir   = out_dir
+        self._proc_path    = proc_path
+        self._pipeline     = pipeline
+        self._run          = run
+        self._out_dir      = out_dir
+        self._project_name = project_name
+        self._crystal_name = crystal_name
+        self._results_path = results_path
+        self._pdb_model    = pdb_model
+        self._anomalous_def = anomalous_def
+        self._macro_cycles = macro_cycles
 
     def run(self) -> None:
         try:
@@ -92,7 +110,23 @@ class _PhenixAnalysisWorker(QThread):
                 self._proc_path,
                 self._run,
                 self.progress.emit,
+                pdb_model=self._pdb_model,
+                anomalous_def=self._anomalous_def,
+                macro_cycles=self._macro_cycles,
+                project_name=self._project_name,
+                crystal_name=self._crystal_name,
             )
+            # Regenerate crystal and project index pages
+            if self._results_path and self._crystal_name:
+                try:
+                    from spread_gui.core.report_index import (
+                        generate_crystal_index, generate_project_index,
+                    )
+                    crystal_dir = Path(self._results_path) / self._crystal_name
+                    generate_crystal_index(crystal_dir, self._project_name, self._crystal_name)
+                    generate_project_index(Path(self._results_path), self._project_name)
+                except Exception as e:
+                    self.progress.emit(f"Warning: could not update index pages: {e}")
             self.finished.emit(html_path)
         except Exception as exc:
             self.error.emit(str(exc))
@@ -103,9 +137,12 @@ class SpreadTab(QWidget):
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self._proc_path: str = ""
-        self._pdb_path:  str = ""
-        self._anom_path: str = ""
+        self._proc_path:    str = ""
+        self._pdb_path:     str = ""
+        self._anom_path:    str = ""
+        self._results_path: str = ""
+        self._project_name: str = ""
+        self._crystal_name: str = ""
         self._analysis_worker: _PhenixAnalysisWorker | None = None
         self._build_ui()
         QTimer.singleShot(0, self._check_ssh_key_status)
@@ -117,6 +154,13 @@ class SpreadTab(QWidget):
         self.proc_path_label.setText(path if path else "\u2014")
         self._refresh_status()
         self._refresh_analysis_run_numbers()
+
+    def set_context(self, project_name: str, crystal_name: str, results_path: str) -> None:
+        """Called when a crystal is loaded to provide naming and output path context."""
+        self._project_name = project_name
+        self._crystal_name = crystal_name
+        self._results_path = results_path
+        self._update_analysis_out_label()
 
     # ---- UI construction ----
 
@@ -503,10 +547,10 @@ class SpreadTab(QWidget):
 #SBATCH --job-name=phenix_job
 #SBATCH --output=slurm-%j.out
 #SBATCH --error=slurm-%j.err
-#SBATCH --partition=cs04r
+#SBATCH --partition=cs04r,cs05r
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=16
-#SBATCH --mem=10G
+#SBATCH --cpus-per-task=4
+#SBATCH --mem=2G
 module load phenix
 
 BASE_DIR=$(pwd)
@@ -637,7 +681,8 @@ phenix.refine ${{energy}}eV_${{images}}img.pdb ${{energy}}eV_${{images}}img.mtz 
                 f"bash {shlex.quote(script_path)} {energy} {images}\n"
             )
             rc, out, err = submit_job_via_rest_api(
-                wrapper, proc_dir, token, job_name=f"phenix_r{run}"
+                wrapper, proc_dir, token, job_name=f"phenix_r{run}",
+                cpus_per_task=4, memory_per_node="2G",
             )
             if rc in (0, 200):
                 self.log_message.emit(
@@ -712,11 +757,20 @@ phenix.refine ${{energy}}eV_${{images}}img.pdb ${{energy}}eV_${{images}}img.mtz 
         self._update_analysis_out_label()
 
     def _analysis_out_dir(self) -> str:
-        if not self._proc_path:
-            return ""
         pipeline = self._analysis_pipeline()
         run      = self._analysis_run()
-        prefix   = _PHENIX_DIR_PREFIX[pipeline]
+        if self._results_path and self._crystal_name:
+            return str(
+                Path(self._results_path)
+                / self._crystal_name
+                / "spread"
+                / pipeline
+                / f"run_{run}"
+            )
+        # Fallback: write under proc_path if results_path not configured
+        if not self._proc_path:
+            return ""
+        prefix = _PHENIX_DIR_PREFIX[pipeline]
         return str(Path(self._proc_path) / "results" / f"{prefix}_{run}")
 
     def _update_analysis_out_label(self) -> None:
@@ -743,7 +797,13 @@ phenix.refine ${{energy}}eV_${{images}}img.pdb ${{energy}}eV_${{images}}img.mtz 
         self.log_message.emit(f"Output   : {out_dir}")
 
         self._analysis_worker = _PhenixAnalysisWorker(
-            self._proc_path, pipeline, run, out_dir
+            self._proc_path, pipeline, run, out_dir,
+            project_name=self._project_name,
+            crystal_name=self._crystal_name,
+            results_path=self._results_path,
+            pdb_model=self._pdb_path,
+            anomalous_def=self._anom_path,
+            macro_cycles=self.macro_cycles_spin.value(),
         )
         self._analysis_worker.progress.connect(self.log_message)
         self._analysis_worker.finished.connect(self._on_phenix_finished)

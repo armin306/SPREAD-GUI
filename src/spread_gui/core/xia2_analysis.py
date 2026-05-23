@@ -11,6 +11,7 @@ Directory layout expected:
 """
 from __future__ import annotations
 
+import csv
 import html as _html
 import re
 from datetime import datetime
@@ -68,6 +69,17 @@ def collect_results(proc_path: Path, pipeline: str) -> ResultMap:
     return results
 
 
+def next_run_number(out_root: Path) -> int:
+    """Return the next available run index under *out_root* (1-based)."""
+    existing = [
+        d for d in out_root.iterdir()
+        if d.is_dir() and d.name.startswith("run_") and d.name[4:].isdigit()
+    ] if out_root.is_dir() else []
+    if not existing:
+        return 1
+    return max(int(d.name[4:]) for d in existing) + 1
+
+
 # ---------------------------------------------------------------------------
 # Main entry point
 # ---------------------------------------------------------------------------
@@ -78,14 +90,19 @@ def generate_report(
     pipeline: str,
     proc_path_str: str,
     log: Callable[[str], None],
+    project_name: str = "",
+    crystal_name: str = "",
+    results_path: str = "",
 ) -> str:
     """
-    Generate PNG plots and an HTML report inside *out_dir*.
+    Generate PNG plots, CSV data files, and an HTML report inside *out_dir*.
     Calls *log* with progress messages.
     Returns the absolute path to index.html.
     """
     plots_dir = out_dir / "plots"
+    data_dir  = out_dir / "data"
     plots_dir.mkdir(parents=True, exist_ok=True)
+    data_dir.mkdir(parents=True, exist_ok=True)
 
     energies = sorted(results.keys())
     wedge_set: set[int] = set()
@@ -152,7 +169,42 @@ def generate_report(
     # Accumulate (section_title, filename) for the HTML table of contents.
     plot_files: list[tuple[str, str]] = []
 
-    def _save_1panel(attr: str, idx: Optional[int], title: str, ylabel: str, fname: str) -> None:
+    def _save_csv_1(attr: str, idx: Optional[int], csv_name: str) -> None:
+        """Save one CSV: rows=wedge sizes, columns=energies."""
+        rows = []
+        header = ["wedge_img"] + [f"{e}_eV" for e in energies]
+        for w in wedges:
+            row = [w]
+            for e in energies:
+                stats = results[e].get(w)
+                val = _get(stats, attr, idx) if stats else None
+                row.append(f"{val:.6g}" if val is not None else "")
+            rows.append(row)
+        with open(data_dir / csv_name, "w", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(header)
+            writer.writerows(rows)
+
+    def _save_csv_3(attr: str, csv_name: str) -> None:
+        """Save one CSV with overall/low/high shell columns for each energy."""
+        shells = ["overall", "low", "high"]
+        header = ["wedge_img"] + [f"{e}_eV_{s}" for e in energies for s in shells]
+        rows = []
+        for w in wedges:
+            row = [w]
+            for e in energies:
+                stats = results[e].get(w)
+                for idx in range(3):
+                    val = _get(stats, attr, idx) if stats else None
+                    row.append(f"{val:.6g}" if val is not None else "")
+            rows.append(row)
+        with open(data_dir / csv_name, "w", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(header)
+            writer.writerows(rows)
+
+    def _save_1panel(attr: str, idx: Optional[int], title: str, ylabel: str,
+                     fname: str, csv_name: str) -> None:
         fig, ax = plt.subplots(figsize=(7, 4))
         _plot_panel(ax, attr, idx, title, ylabel)
         fig.tight_layout()
@@ -160,8 +212,10 @@ def generate_report(
         plt.close(fig)
         plot_files.append((title, fname))
         log(f"  {fname}")
+        _save_csv_1(attr, idx, csv_name)
 
-    def _save_3panel(attr: str, title: str, ylabel: str, fname: str) -> None:
+    def _save_3panel(attr: str, title: str, ylabel: str,
+                     fname: str, csv_name: str) -> None:
         fig, axes = plt.subplots(1, 3, figsize=(15, 4))
         for j, shell in enumerate(("Overall", "Low shell", "High shell")):
             _plot_panel(axes[j], attr, j, f"{title} — {shell}", ylabel)
@@ -170,40 +224,46 @@ def generate_report(
         plt.close(fig)
         plot_files.append((title, fname))
         log(f"  {fname}")
+        _save_csv_3(attr, csv_name)
 
     # -------------------------------------------------------------------
-    # Generate all plots
+    # Generate all plots + CSVs
     # -------------------------------------------------------------------
-    log("Generating plots…")
+    log("Generating plots and CSV files…")
 
-    _save_1panel("high_res",          0,    "High resolution limit",    "d (Å)",          "high_res.png")
-    _save_1panel("completeness",      0,    "Completeness",             "Completeness (%)", "completeness.png")
-    _save_1panel("multiplicity",      0,    "Multiplicity",             "Multiplicity",   "multiplicity.png")
-    _save_3panel("i_over_sigma",            "I/σ(I)",                   "I/σ(I)",         "i_sigma.png")
-    _save_3panel("rmerge_ipm",              "Rmerge(I+/-)",             "Rmerge",         "rmerge_ipm.png")
-    _save_3panel("cc_half",                 "CC½",                      "CC½",            "cc_half.png")
-    _save_1panel("wilson_b",          None, "Wilson B factor",          "B (Å²)",         "wilson_b.png")
-    _save_3panel("anom_completeness",       "Anomalous completeness",   "Completeness (%)", "anom_completeness.png")
-    _save_3panel("anom_multiplicity",       "Anomalous multiplicity",   "Multiplicity",   "anom_multiplicity.png")
-    _save_1panel("anom_slope",        None, "Anomalous slope",          "Slope",          "anom_slope.png")
+    _save_1panel("high_res",       0,    "High resolution limit",    "d (Å)",          "high_res.png",          "high_res.csv")
+    _save_1panel("completeness",   0,    "Completeness",             "Completeness (%)", "completeness.png",    "completeness.csv")
+    _save_1panel("multiplicity",   0,    "Multiplicity",             "Multiplicity",   "multiplicity.png",      "multiplicity.csv")
+    _save_3panel("i_over_sigma",         "I/σ(I)",                   "I/σ(I)",         "i_sigma.png",           "i_sigma.csv")
+    _save_3panel("rmerge_ipm",           "Rmerge(I+/-)",             "Rmerge",         "rmerge_ipm.png",        "rmerge_ipm.csv")
+    _save_3panel("cc_half",              "CC½",                      "CC½",            "cc_half.png",           "cc_half.csv")
+    _save_1panel("wilson_b",       None, "Wilson B factor",          "B (Å²)",         "wilson_b.png",          "wilson_b.csv")
+    _save_3panel("anom_completeness",    "Anomalous completeness",   "Completeness (%)", "anom_completeness.png", "anom_completeness.csv")
+    _save_3panel("anom_multiplicity",    "Anomalous multiplicity",   "Multiplicity",   "anom_multiplicity.png", "anom_multiplicity.csv")
+    _save_1panel("anom_slope",     None, "Anomalous slope",          "Slope",          "anom_slope.png",        "anom_slope.csv")
 
     # Unit cell — 2×3 grid (a, b, c / α, β, γ)
     log("  unit_cell.png")
     _make_unit_cell_plot(results, energies, wedges, colors, plots_dir)
     plot_files.append(("Unit cell parameters", "unit_cell.png"))
+    _save_unit_cell_csv(results, energies, wedges, data_dir)
 
     # -------------------------------------------------------------------
     # HTML report
     # -------------------------------------------------------------------
     log("Writing HTML report…")
     html_path = out_dir / "index.html"
-    _write_html(html_path, results, energies, wedges, plot_files, pipeline, proc_path_str)
+    _write_html(
+        html_path, results, energies, wedges, plot_files,
+        pipeline, proc_path_str, project_name, crystal_name, results_path,
+        out_dir,
+    )
     log(f"Report: {html_path}")
     return str(html_path)
 
 
 # ---------------------------------------------------------------------------
-# Unit cell plot
+# Unit cell plot + CSV
 # ---------------------------------------------------------------------------
 
 def _make_unit_cell_plot(
@@ -252,9 +312,70 @@ def _make_unit_cell_plot(
     plt.close(fig)
 
 
+def _save_unit_cell_csv(
+    results: ResultMap,
+    energies: list[int],
+    wedges: list[int],
+    data_dir: Path,
+) -> None:
+    params = ["cell_a", "cell_b", "cell_c", "cell_alpha", "cell_beta", "cell_gamma"]
+    header = ["wedge_img"] + [f"{e}_eV_{p}" for e in energies for p in params]
+    rows = []
+    for w in wedges:
+        row = [w]
+        for e in energies:
+            stats = results[e].get(w)
+            for p in params:
+                val = getattr(stats, p, None) if stats else None
+                row.append(f"{val:.6g}" if val is not None else "")
+        rows.append(row)
+    with open(data_dir / "unit_cell.csv", "w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(header)
+        writer.writerows(rows)
+
+
 # ---------------------------------------------------------------------------
 # HTML generation
 # ---------------------------------------------------------------------------
+
+def _summary_table_html(
+    results: ResultMap,
+    energies: list[int],
+    wedges: list[int],
+) -> str:
+    """Numerical summary: best resolution and completeness per energy/wedge."""
+    header = (
+        "<tr><th>Energy (eV)</th><th>Wedge (img)</th>"
+        "<th>Resolution (Å)</th><th>Completeness (%)</th>"
+        "<th>Multiplicity</th><th>I/σ(I)</th><th>CC½</th><th>Rmerge</th></tr>"
+    )
+    rows = []
+    for e in energies:
+        for w in wedges:
+            stats = results[e].get(w)
+            if stats is None:
+                continue
+            def _f(v, idx=None, fmt=".2f"):
+                if v is None:
+                    return "—"
+                val = v[idx] if (idx is not None and isinstance(v, tuple)) else v
+                return f"{val:{fmt}}" if val is not None else "—"
+            rows.append(
+                f"<tr>"
+                f"<td>{e}</td><td>{w}</td>"
+                f"<td>{_f(stats.high_res, 0)}</td>"
+                f"<td>{_f(stats.completeness, 0)}</td>"
+                f"<td>{_f(stats.multiplicity, 0)}</td>"
+                f"<td>{_f(stats.i_over_sigma, 0)}</td>"
+                f"<td>{_f(stats.cc_half, 0)}</td>"
+                f"<td>{_f(stats.rmerge_ipm, 0)}</td>"
+                f"</tr>"
+            )
+    return (
+        "<table>" + header + "".join(rows) + "</table>"
+    )
+
 
 def _write_html(
     html_path: Path,
@@ -264,12 +385,31 @@ def _write_html(
     plot_files: list[tuple[str, str]],
     pipeline: str,
     proc_path_str: str,
+    project_name: str,
+    crystal_name: str,
+    results_path: str,
+    out_dir: Path,
 ) -> None:
     n_total = sum(len(wd) for wd in results.values())
     n_ok    = sum(1 for wd in results.values() for s in wd.values() if s is not None)
     n_fail  = n_total - n_ok
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     proc_path = Path(proc_path_str)
+
+    # Breadcrumb
+    crystal_index = out_dir.parent.parent.parent / "index.html"  # spread/{pipeline}/run_N → crystal
+    proj_index    = crystal_index.parent / "index.html"
+    breadcrumb_parts = []
+    if proj_index.exists():
+        breadcrumb_parts.append(f'<a href="../../../index.html">{_html.escape(project_name)}</a>')
+    elif project_name:
+        breadcrumb_parts.append(_html.escape(project_name))
+    if crystal_index.exists():
+        breadcrumb_parts.append(f'<a href="../../index.html">{_html.escape(crystal_name)}</a>')
+    elif crystal_name:
+        breadcrumb_parts.append(_html.escape(crystal_name))
+    breadcrumb_parts.append(f"{_html.escape(pipeline)} — {out_dir.name}")
+    breadcrumb = " / ".join(breadcrumb_parts)
 
     # ---- Run-status table ----
     header = "<th>Energy</th>" + "".join(f"<th>{w} img</th>" for w in wedges)
@@ -309,6 +449,8 @@ def _write_html(
         for t, fn in plot_files
     )
 
+    summary_table = _summary_table_html(results, energies, wedges)
+
     content = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -320,9 +462,15 @@ def _write_html(
     h2    {{ color: #2a6ab0; border-bottom: 1px solid #ccc; padding-bottom: 4px; margin-top: 32px; }}
     h3    {{ color: #333; margin-top: 28px; }}
     .meta {{ color: #666; font-size: 13px; }}
+    .breadcrumb {{ font-size: 13px; color: #888; margin-bottom: 12px; }}
+    .breadcrumb a {{ color: #2a6ab0; text-decoration: none; }}
+    .breadcrumb a:hover {{ text-decoration: underline; }}
     table.status {{ border-collapse: collapse; font-size: 13px; margin-top: 8px; }}
     table.status th, table.status td {{ border: 1px solid #bbb; padding: 4px 10px; }}
     table.status th {{ background: #e8eef8; }}
+    table {{ border-collapse: collapse; font-size: 13px; margin-top: 8px; }}
+    th, td {{ border: 1px solid #bbb; padding: 4px 10px; }}
+    th {{ background: #e8eef8; }}
     td.ok   {{ background: #d4edda; text-align: center; }}
     td.fail {{ background: #f8d7da; text-align: center; }}
     td.na   {{ background: #f0f0f0; text-align: center; color: #999; }}
@@ -331,6 +479,7 @@ def _write_html(
   </style>
 </head>
 <body>
+<p class="breadcrumb">{breadcrumb}</p>
 <h1>xia2 Analysis &mdash; {_html.escape(pipeline)}</h1>
 <p class="meta">Generated: {timestamp}</p>
 <p class="meta">Processing path: {_html.escape(proc_path_str)}</p>
@@ -341,6 +490,7 @@ def _write_html(
   <span style="color:#1a7a3c">{n_ok} successful</span>,
   <span style="color:#c0392b">{n_fail} failed</span>
 </p>
+{summary_table}
 
 <h2>Run Status</h2>
 {status_table}

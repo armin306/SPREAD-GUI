@@ -80,8 +80,8 @@ class _DataScanWorker(QThread):
 
 
 class ProcessingTab(QWidget):
-    # Emitted when a crystal is loaded from the database (project_name, crystal_name).
-    crystal_context_changed = pyqtSignal(str, str)
+    # Emitted when a crystal is loaded from the database (project_name, crystal_name, results_path).
+    crystal_context_changed = pyqtSignal(str, str, str)
     # Emitted after any save: (data_path, proc_path, space_group, cell_str).
     processing_info_changed = pyqtSignal(str, str, str, str)
     # Emitted after jobs are submitted so the tab indicator can be updated.
@@ -328,10 +328,12 @@ class ProcessingTab(QWidget):
         self.btn_submit.clicked.connect(self.submit_jobs)
         self.btn_setup_ssh_key.clicked.connect(self._setup_ssh_key)
 
-        # Keep the embedded analysis section in sync with proc_path changes,
-        # and forward its log messages to the shared main-window log.
+        # Keep the embedded analysis section in sync with proc_path and crystal context.
         self.processing_info_changed.connect(
             lambda _d, proc, _sg, _c: self.analysis_section.set_proc_path(proc)
+        )
+        self.crystal_context_changed.connect(
+            lambda proj, crys, rpath: self.analysis_section.set_context(proj, crys, rpath)
         )
         self.analysis_section.log_message.connect(self.log_message)
 
@@ -522,7 +524,9 @@ class ProcessingTab(QWidget):
         self._refresh_previews_and_validation()
         self._schedule_energy_scan()
         project_name, crystal_name = self._db.get_crystal_info(crystal_id)
-        self.crystal_context_changed.emit(project_name, crystal_name)
+        project = self._db.get_project_for_crystal(crystal_id)
+        results_path = project.results_path if project else ""
+        self.crystal_context_changed.emit(project_name, crystal_name, results_path)
         self._emit_processing_info()
 
     # ---------------- UI helpers ----------------
@@ -791,10 +795,10 @@ done
 #SBATCH --job-name=autoPROC_job
 #SBATCH --output=slurm-%j.out
 #SBATCH --error=slurm-%j.err
-#SBATCH --partition=cs04r
+#SBATCH --partition=cs04r,cs05r
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=16
-#SBATCH --mem=10G
+#SBATCH --mem=4G
 module load autoPROC
 BASE_DIR=$(pwd)
 DATA_DIR="{data_dir}"
@@ -842,10 +846,10 @@ process -M DiamondI23 \\
 #SBATCH --job-name=xia2_dials_job
 #SBATCH --output=slurm-%j.out
 #SBATCH --error=slurm-%j.err
-#SBATCH --partition=cs04r
+#SBATCH --partition=cs04r,cs05r
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=16
-#SBATCH --mem=10G
+#SBATCH --mem=4G
 module load xia2
 BASE_DIR=$(pwd)
 DATA_DIR="{data_dir}"
@@ -896,10 +900,10 @@ xia2 pipeline=dials \\
 #SBATCH --job-name=xia2_3dii_job
 #SBATCH --output=slurm-%j.out
 #SBATCH --error=slurm-%j.err
-#SBATCH --partition=cs04r
+#SBATCH --partition=cs04r,cs05r
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=16
-#SBATCH --mem=10G
+#SBATCH --mem=4G
 module load xia2
 BASE_DIR=$(pwd)
 DATA_DIR="{data_dir}"

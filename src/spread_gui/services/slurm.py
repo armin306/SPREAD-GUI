@@ -137,6 +137,8 @@ def submit_job_via_rest_api(
     token: str,
     job_name: str = "i23_proc",
     dry_run: bool = False,
+    cpus_per_task: int = 16,
+    memory_per_node: str = "4G",
 ) -> Tuple[int, str, str]:
     """Submit a job script to SLURM via the Diamond Light Source REST API."""
     if dry_run:
@@ -148,12 +150,12 @@ def submit_job_via_rest_api(
 
     payload: dict = {
         "job": {
-            "partition": "cs04r",
+            "partition": "cs04r,cs05r",
             "tasks": 1,
             "name": job_name,
             "nodes": 1,
-            "cpus_per_task": "16",
-            "memory_per_cpu": "10G",
+            "cpus_per_task": str(cpus_per_task),
+            "memory_per_node": memory_per_node,
             "current_working_directory": cwd,
             "environment": {
                 "USER": user,

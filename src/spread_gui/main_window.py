@@ -213,7 +213,10 @@ class MainWindow(QMainWindow):
         # ---- Signals ----
         self.proc_tab.crystal_context_changed.connect(self._on_crystal_context_changed)
         self.proc_tab.crystal_context_changed.connect(
-            lambda _p, _c: self._update_processing_tab_indicator()
+            lambda _p, _c, _r: self._update_processing_tab_indicator()
+        )
+        self.proc_tab.crystal_context_changed.connect(
+            lambda _p, crys, rpath: self.spread_tab.set_context(_p, crys, rpath)
         )
         self.proc_tab.processing_info_changed.connect(self._on_processing_info_changed)
         self.proc_tab.jobs_status_changed.connect(self._update_processing_tab_indicator)
@@ -230,7 +233,11 @@ class MainWindow(QMainWindow):
         if cid is not None:
             project, crystal = self._db.get_crystal_info(cid)
             if project:
-                self._on_crystal_context_changed(project, crystal)
+                proj_obj = self._db.get_project_for_crystal(cid)
+                rpath = proj_obj.results_path if proj_obj else ""
+                self._on_crystal_context_changed(project, crystal, rpath)
+                self.spread_tab.set_context(project, crystal, rpath)
+                self.proc_tab.analysis_section.set_context(project, crystal, rpath)
             else:
                 self.proc_tab._current_crystal_id = None
 
@@ -247,7 +254,7 @@ class MainWindow(QMainWindow):
 
     # ---- Header updates ----
 
-    def _on_crystal_context_changed(self, project: str, crystal: str) -> None:
+    def _on_crystal_context_changed(self, project: str, crystal: str, results_path: str = "") -> None:
         self._lbl_project.setText(project if project else "\u2014")
         self._lbl_crystal.setText(crystal if crystal else "\u2014")
 
