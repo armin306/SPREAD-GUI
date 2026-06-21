@@ -857,6 +857,8 @@ process -M DiamondI23 \\
   -d autoPROC \\
   cell="{cell.as_autoproc_string()}" \\
   symm="{sg}" > aP.log
+find autoPROC -name "*.HKL" -delete 2>/dev/null
+rm -rf autoPROC/IterativeIndexing 2>/dev/null
 """
 
     def _make_xia2_dials_job(self, data_dir: str, cell: Cell, sg: str, project: str, crystal: str, total_images: int) -> str:
