@@ -5,7 +5,7 @@
 | Document owner | Armin Wagner                                  |
 | Application    | SPREAD Processing Pipeline GUI                |
 | Status         | Current implementation                        |
-| Last updated   | May 2026                                      |
+| Last updated   | June 2026                                     |
 | Audience       | Beamline scientists, software developers      |
 
 ---
@@ -114,7 +114,7 @@ jobs      (id, crystal_id, slurm_job_id, pipeline, proc_dir, output_dir,
 ```
 
 - Crystals are deleted automatically when their parent project is deleted (`ON DELETE CASCADE`); jobs cascade from crystals.
-- `projects.results_path` stores the root directory for all HTML reports, PNG plots, and CSV data files for that project. Set via **Edit** in the Manage Projects dialog.
+- `projects.results_path` stores the root directory for all HTML reports for that project. Set via **Edit** in the Manage Projects dialog.
 - The `settings` JSON uses the same key names as `settings.ini` so either source can populate the form without conversion.
 - `jobs.output_dir` stores the path of the pipeline output directory **relative to `proc_dir`** (e.g. `7118eV/300img/xia2-dials`). This allows a future cleanup feature to identify and selectively delete output files per job and pipeline without ambiguity.
 - `jobs.status` is one of `submitted`, `completed`, or `failed`. The filesystem poller updates this to `completed` when the output directory appears on disk.
@@ -263,7 +263,17 @@ To submit manually, open a terminal on Wilson and run:
 This will submit N job(s) via sbatch.
 ```
 
-### 9.5 SSH Key Status
+### 9.5 Clean Up Intermediate Files
+
+A **Clean up intermediate files…** button sits alongside **Submit jobs**. When clicked it:
+
+1. Scans the current processing path for deletable intermediate files based on the selected pipeline:
+   - **xia2-dials / xia2-3dii**: the `DEFAULT/` subdirectory inside each `{energy}eV/{images}img/{pipeline}/` directory (DIALS intermediate files; the final MTZ in `DataFiles/` is preserved).
+   - **autoPROC**: `*.HKL` files (XDS_ASCII.HKL, XSCALE.HKL) and the `IterativeIndexing/` subdirectory inside each `{energy}eV/{images}img/autoPROC/` directory. All MTZ, SCA, HTML, log, and LP files are preserved.
+2. Shows a confirmation dialog listing the items to be deleted and the estimated space to be freed.
+3. Deletes only after explicit confirmation. Results are logged to the log panel.
+
+### 9.6 SSH Key Status
 
 The status label shows whether passwordless SSH to `wilson` is configured, using `BatchMode=yes` with a 5-second timeout. The exact SSH error is shown as a tooltip when auth fails.
 
@@ -306,18 +316,14 @@ Only the driver script and the **selected pipeline's** job script are written. F
     processing/
       xia2-dials/
         run_1/
-          index.html            Processing analysis report
-          plots/                PNG files (one per metric)
-          data/                 CSV files (one per metric, same data as plots)
+          index.html            Self-contained HTML report (plots embedded as base64)
         run_2/ …
       xia2-3dii/ …
       autoPROC/ …
     spread/
       xia2-dials/
         run_1/
-          index.html            SPREAD analysis report
-          plots/                PNG files (summary per group, per-wedge, R-work/R-free)
-          data/                 CSV files (one per figure)
+          index.html            Self-contained HTML report (plots embedded as base64)
         run_2/ …
       xia2-3dii/ …
       autoPROC/ …
@@ -437,19 +443,17 @@ After the report is written, the crystal index page (`{results_path}/{crystal}/i
 
 ```
 run_N/
-  index.html        HTML report with status table, summary table, and plots
-  plots/            PNG files (one per metric)
-  data/             CSV files (matching data for each PNG)
+  index.html        Self-contained HTML report (plots embedded as base64)
 ```
 
-**CSV format**: rows = wedge sizes, columns = energies. Three-shell metrics have one column per energy per shell (e.g. `7100_eV_overall`, `7100_eV_low`, `7100_eV_high`).
+No external PNG or CSV files are written. Each report is a single portable file.
 
 The HTML report contains:
 - A breadcrumb navigation bar linking to the crystal and project index pages.
-- A colour-coded **run status table** (green ✓ / red ✗ per energy/wedge combination). Each cell links to the pipeline's own HTML summary (`xia2.html` or `autoPROC/summary.html`) when the file exists.
+- A colour-coded **run status table** (green ✓ / red ✗ per energy/wedge combination). For xia2, each cell links to the pipeline's own `xia2.html` when the file exists.
 - A **numerical summary table** (one row per energy × wedge combination) showing resolution, completeness, multiplicity, I/σ(I), CC½, and Rmerge at a glance.
-- A table of contents linking to each plot.
-- Plots as `<img>` tags referencing the `plots/` subdirectory (not base64-embedded).
+- A table of contents linking to each plot section.
+- Plots embedded inline as base64-encoded PNG data URIs.
 
 All plots show wedge size on the x-axis. Multi-shell metrics (overall / low / high) are shown as three-panel figures.
 
@@ -555,20 +559,10 @@ A "Results directory" label below the controls shows the resolved output path be
 
 ```
 {results_path}/{crystal}/spread/{pipeline}/run_N/
-    phenix_analysis.html
-    plots/
-        fpfpp_fp_<group>.png   ← f′ overview (one file per group)
-        fpfpp_fpp_<group>.png  ← f″ overview
-        wedge_<N>img.png       ← per-wedge f′/f″ plot
-        rwork_rfree.png        ← R-work and R-free vs energy
-    data/
-        fpfpp_fp_<group>.csv
-        fpfpp_fpp_<group>.csv
-        wedge_<N>img.csv
-        rwork_rfree.csv
+    index.html     ← self-contained HTML report (plots embedded as base64)
 ```
 
-When `results_path` is not configured for the project, the output falls back to `{proc_path}/results/{pipeline_prefix}_{run}/`.
+No external PNG or CSV files are written. When `results_path` is not configured for the project, the output falls back to `{proc_path}/results/{pipeline_prefix}_{run}/`.
 
 The run counter `N` is determined at runtime: the GUI scans existing `run_N` directories under `.../spread/{pipeline}/` and increments the maximum by one.
 
@@ -583,19 +577,17 @@ For each log file matching `{proc_path}/*eV/*img/{prefix}_{run}/*_refine_001.log
 
 #### Report generation (`phenix_analysis`)
 
-The HTML report links to external PNG files (not base64-embedded) and contains:
+The HTML report is self-contained (plots embedded as base64) and contains:
 
 1. **Metadata block**: project name, crystal name, pipeline, processing path, run number, PDB model, anomalous selection, macro cycles.
 2. **Breadcrumb navigation**: links to the crystal index and project index pages.
 3. **Table of contents**: anchored links to each section.
-4. **Overview — f′ (all wedges)**: one subplot per anomalous group, one line per wedge size, x-axis = energy. PNG saved as `plots/fpfpp_fp_<group>.png`, data as `data/fpfpp_fp_<group>.csv`.
+4. **Overview — f′ (all wedges)**: one subplot per anomalous group, one line per wedge size, x-axis = energy.
 5. **Overview — f″ (all wedges)**: same structure for f″.
-6. **R-work and R-free vs energy**: one line per wedge size, both metrics on the same axes. PNG saved as `plots/rwork_rfree.png`, data as `data/rwork_rfree.csv`.
-7. **Per-wedge sections** (ordered by increasing wedge size): for each wedge, f′ and f″ vs energy side-by-side with one line per group, followed by a table of R-work, R-free, and f′/f″ per energy. PNG saved as `plots/wedge_<N>img.png`, data as `data/wedge_<N>img.csv`.
+6. **R-work and R-free vs energy**: one line per wedge size, both metrics on the same axes.
+7. **Per-wedge sections** (ordered by increasing wedge size): for each wedge, f′ and f″ vs energy side-by-side with one line per group, followed by a table of R-work, R-free, and f′/f″ per energy.
 
 The anomalous group label used in plots is derived from the selection string as `{chain}-{resid}-{atom}` (e.g. `A-401-CA`).
-
-All CSV files use comma separation with a header row. Overview CSVs have rows = wedge sizes, columns = energies. Per-wedge CSVs have rows = energies, columns = R-work, R-free, f′ and f″ per group.
 
 Report generation runs in a `QThread`. On completion:
 - The crystal-level and project-level index HTML pages are regenerated.
@@ -636,6 +628,7 @@ Report generation runs in a `QThread`. On completion:
 
 | Date       | Change                                                                                   |
 |------------|------------------------------------------------------------------------------------------|
+| June 2026  | Housekeeping: SLURM job scripts redirect stdout/stderr to `/dev/null` (pipeline-specific logs capture all output). Analysis reports are now fully self-contained: plots embedded as base64 PNG data URIs; no external `plots/` or `data/` directories are written. New **Clean up intermediate files…** button in the Processing tab: scans the processing path for large intermediate files (xia2 `DEFAULT/` directories; autoPROC `*.HKL` files and `IterativeIndexing/`), shows a confirmation dialog with estimated freed space, and deletes on confirmation. |
 | May 2026   | Performance: SPREAD tab status scanning (MTZ discovery + run-number detection) moved to a background `QThread`; widget signals blocked during crystal load to eliminate redundant recomputation; `get_crystal_context()` replaces two separate DB queries on crystal load. Processing and SPREAD analysis reports: run status table moved above numerical summary table. Bug fix: `macro_cycles_spin` renamed to `spin_cycles` (attribute mismatch crash on Analyse SPREAD). |
 | May 2026   | Results tree: `results_path` added to projects (DB migration, Edit Project dialog, Open Results button). Centralized output hierarchy `{results_path}/{crystal}/processing\|spread/{pipeline}/run_N/` with auto-incrementing run counter. All plots saved as external PNG files; underlying data exported as CSV files in a `data/` subdirectory. HTML reports updated: external PNG links, breadcrumb navigation (crystal/project index), TOC, metadata block, numerical summary tables. New R-work/R-free vs energy plot in phenix reports. `report_index.py`: generates crystal-level and project-level HTML index pages by scanning the results tree; indexes regenerated after each analysis run. `crystal_context_changed` signal extended to carry `results_path`. SLURM: partition set to `cs04r,cs05r`; phenix jobs use `--cpus-per-task=4 --mem=2G`; processing jobs use `--mem=4G`; resource parameters made configurable in `slurm.py`. |
 | May 2026   | SPREAD tab: phenix.refine anomalous refinement submission across the energy/wedge grid (per-pipeline scripts, auto-detected run number, MTZ discovery, pipeline-specific miller labels). Analyse SPREAD section: phenix.refine log parsing (`phenix_parser`), f′/f″ vs energy HTML report with overview and per-wedge plots (`phenix_analysis`). Analysis tab embedded in Processing tab as "Analyse Processing". Shared log panel (permanent, QSplitter). Application restructured to two top-level tabs (Processing, SPREAD). |
