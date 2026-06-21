@@ -272,7 +272,9 @@ class ProcessingTab(QWidget):
         # Actions
         a_row = QHBoxLayout()
         self.btn_submit = QPushButton("Submit jobs")
+        self.btn_cleanup = QPushButton("Clean up intermediate files…")
         a_row.addWidget(self.btn_submit)
+        a_row.addWidget(self.btn_cleanup)
         a_row.addStretch(1)
         root.addLayout(a_row)
 
@@ -326,6 +328,7 @@ class ProcessingTab(QWidget):
         self.rb_submit_dry.toggled.connect(self._schedule_autosave)
 
         self.btn_submit.clicked.connect(self.submit_jobs)
+        self.btn_cleanup.clicked.connect(self._cleanup_intermediate_files)
         self.btn_setup_ssh_key.clicked.connect(self._setup_ssh_key)
 
         # Keep the embedded analysis section in sync with proc_path and crystal context.
@@ -562,6 +565,75 @@ class ProcessingTab(QWidget):
 
     def _info(self, title: str, msg: str) -> None:
         QMessageBox.information(self, title, msg)
+
+    # ---- Cleanup ----
+
+    def _cleanup_intermediate_files(self) -> None:
+        if not self._proc_path:
+            self._warn("No crystal loaded", "Load a crystal first.")
+            return
+
+        proc = Path(self._proc_path)
+        pipeline_key = self._pipeline_key()
+
+        # Collect targets to delete per pipeline
+        targets: list[Path] = []
+        if pipeline_key in ("xia2_dials", "xia2_3dii"):
+            pipeline_dir = "xia2-dials" if pipeline_key == "xia2_dials" else "xia2-3dii"
+            for default_dir in sorted(proc.glob(f"*eV/*img/{pipeline_dir}/DEFAULT")):
+                if default_dir.is_dir():
+                    targets.append(default_dir)
+        else:  # autoproc
+            for ap_dir in sorted(proc.glob("*eV/*img/autoPROC")):
+                if ap_dir.is_dir():
+                    for hkl in ap_dir.glob("*.HKL"):
+                        targets.append(hkl)
+                    iteridx = ap_dir / "IterativeIndexing"
+                    if iteridx.is_dir():
+                        targets.append(iteridx)
+
+        if not targets:
+            self._info("Nothing to clean up",
+                       "No intermediate files found for the selected pipeline.")
+            return
+
+        # Calculate total size
+        def _du(p: Path) -> int:
+            if p.is_file():
+                return p.stat().st_size
+            return sum(f.stat().st_size for f in p.rglob("*") if f.is_file())
+
+        total_bytes = sum(_du(t) for t in targets)
+        total_mb = total_bytes / (1024 ** 2)
+
+        item_list = "\n".join(f"  {t.relative_to(proc)}" for t in targets[:20])
+        if len(targets) > 20:
+            item_list += f"\n  … and {len(targets) - 20} more"
+
+        reply = QMessageBox.question(
+            self, "Clean up intermediate files",
+            f"Delete {len(targets)} item(s) freeing ~{total_mb:.0f} MB?\n\n{item_list}",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        import shutil
+        deleted, failed = 0, 0
+        for t in targets:
+            try:
+                if t.is_dir():
+                    shutil.rmtree(t)
+                else:
+                    t.unlink()
+                deleted += 1
+            except Exception as e:
+                self._log(f"Could not delete {t}: {e}")
+                failed += 1
+
+        self._log(f"Clean up: {deleted} item(s) deleted"
+                  + (f", {failed} failed" if failed else "")
+                  + f" (~{total_mb:.0f} MB freed)")
 
     def _update_energy_mode(self) -> None:
         range_mode = self.rb_energy_range.isChecked()
@@ -857,8 +929,6 @@ process -M DiamondI23 \\
   -d autoPROC \\
   cell="{cell.as_autoproc_string()}" \\
   symm="{sg}" > aP.log
-find autoPROC -name "*.HKL" -delete 2>/dev/null
-rm -rf autoPROC/IterativeIndexing 2>/dev/null
 """
 
     def _make_xia2_dials_job(self, data_dir: str, cell: Cell, sg: str, project: str, crystal: str, total_images: int) -> str:
@@ -913,7 +983,6 @@ xia2 pipeline=dials \\
   unit_cell="{cell.as_autoproc_string()}" \\
   project={project} \\
   crystal={crystal}
-rm -rf DEFAULT
 """
 
     def _make_xia2_3dii_job(self, data_dir: str, cell: Cell, sg: str, project: str, crystal: str, total_images: int) -> str:
@@ -968,7 +1037,6 @@ xia2 pipeline=3dii \\
   unit_cell="{cell.as_autoproc_string()}" \\
   project={project} \\
   crystal={crystal}
-rm -rf DEFAULT
 """
 
     # ---------------- New project ----------------
