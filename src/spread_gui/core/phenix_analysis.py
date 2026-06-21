@@ -1,18 +1,19 @@
 """
-Generate an HTML report for phenix.refine anomalous refinement results.
+Generate a self-contained HTML report for phenix.refine anomalous refinement results.
 
 Plots f' and f'' versus energy:
   - Summary: one figure per anomalous group (f' and f'' side-by-side), one line per wedge
   - Per-wedge: f' and f'' side-by-side, one line per group
   - R-work / R-free vs energy: one line per wedge size
 
-All figures are saved as PNG files in plots/; underlying data as CSV in data/.
+Plots are embedded as base64; no external PNG or CSV files are written.
 """
 from __future__ import annotations
 
-import csv
+import base64
 import html as _html
 from datetime import datetime
+from io import BytesIO
 from pathlib import Path
 from typing import Callable
 
@@ -25,7 +26,7 @@ from spread_gui.core.phenix_parser import PhenixResult, group_short_label
 
 
 # ---------------------------------------------------------------------------
-# Figure helpers
+# Figure helpers — return (base64_png, ...)
 # ---------------------------------------------------------------------------
 
 def _group_summary_fig(
@@ -33,17 +34,11 @@ def _group_summary_fig(
     energies: list[int],
     wedges: list[int],
     sel: str,
-    plots_dir: Path,
-    data_dir: Path,
-    fname_stem: str,
 ) -> str:
-    """Save f'/f'' summary PNG + CSV for one anomalous group. Returns PNG filename."""
+    """Render f'/f'' summary for one anomalous group. Returns base64 PNG."""
     colors = cm.tab10.colors
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(11, 4))
     fig.suptitle(group_short_label(sel))
-
-    csv_header = ["energy_eV"]
-    csv_rows: dict[int, list] = {e: [e] for e in energies}
 
     for wi, images in enumerate(sorted(wedges)):
         xs, fps, fdps = [], [], []
@@ -62,16 +57,6 @@ def _group_summary_fig(
             ax1.plot(xs, fps,  marker="o", color=c, label=f"{images} img")
             ax2.plot(xs, fdps, marker="o", color=c, label=f"{images} img")
 
-        # CSV columns for this wedge
-        csv_header += [f"{images}img_f_prime", f"{images}img_f_double_prime"]
-        fp_map  = dict(zip(xs, fps))
-        fdp_map = dict(zip(xs, fdps))
-        for e in energies:
-            csv_rows[e] += [
-                f"{fp_map[e]:.6g}"  if e in fp_map  else "",
-                f"{fdp_map[e]:.6g}" if e in fdp_map else "",
-            ]
-
     for ax, lbl in ((ax1, "f'"), (ax2, "f''")):
         ax.set_xlabel("Energy (eV)")
         ax.set_ylabel(lbl)
@@ -82,18 +67,7 @@ def _group_summary_fig(
                   borderaxespad=0, fontsize="small")
 
     plt.tight_layout()
-    png_name = f"{fname_stem}.png"
-    fig.savefig(plots_dir / png_name, dpi=100, bbox_inches="tight")
-    plt.close(fig)
-
-    # Write CSV
-    with open(data_dir / f"{fname_stem}.csv", "w", newline="") as f:
-        writer = csv.writer(f)
-        writer.writerow(csv_header)
-        for e in energies:
-            writer.writerow(csv_rows[e])
-
-    return png_name
+    return _fig_to_b64(fig)
 
 
 def _wedge_fig(
@@ -101,21 +75,11 @@ def _wedge_fig(
     energies: list[int],
     images: int,
     groups: list[str],
-    plots_dir: Path,
-    data_dir: Path,
-    fname_stem: str,
 ) -> str:
-    """Save f'/f'' per-wedge PNG + CSV. Returns PNG filename."""
+    """Render f'/f'' per-wedge figure. Returns base64 PNG."""
     colors = cm.tab10.colors
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(11, 4))
     fig.suptitle(f"{images} images")
-
-    # CSV: one row per energy
-    csv_header = ["energy_eV", "r_work", "r_free"]
-    for sel in groups:
-        lbl = group_short_label(sel)
-        csv_header += [f"{lbl}_f_prime", f"{lbl}_f_double_prime"]
-    csv_rows: dict[int, list] = {e: [e] for e in energies}
 
     for gi, sel in enumerate(groups):
         label = group_short_label(sel)
@@ -134,20 +98,6 @@ def _wedge_fig(
         if xs:
             ax1.plot(xs, fps,  marker="o", color=c, label=label)
             ax2.plot(xs, fdps, marker="o", color=c, label=label)
-        fp_map  = dict(zip(xs, fps))
-        fdp_map = dict(zip(xs, fdps))
-        for e in energies:
-            csv_rows[e] += [
-                f"{fp_map[e]:.6g}"  if e in fp_map  else "",
-                f"{fdp_map[e]:.6g}" if e in fdp_map else "",
-            ]
-
-    # Insert Rwork/Rfree into CSV rows (position 1 and 2)
-    for e in energies:
-        res = results.get((e, images))
-        rw = f"{res.r_work_final:.6g}" if (res and res.r_work_final is not None) else ""
-        rf = f"{res.r_free_final:.6g}" if (res and res.r_free_final is not None) else ""
-        csv_rows[e] = [e, rw, rf] + csv_rows[e][1:]
 
     for ax, lbl in ((ax1, "f'"), (ax2, "f''")):
         ax.set_xlabel("Energy (eV)")
@@ -159,33 +109,18 @@ def _wedge_fig(
                   borderaxespad=0, fontsize="small")
 
     plt.tight_layout()
-    png_name = f"{fname_stem}.png"
-    fig.savefig(plots_dir / png_name, dpi=100, bbox_inches="tight")
-    plt.close(fig)
-
-    with open(data_dir / f"{fname_stem}.csv", "w", newline="") as f:
-        writer = csv.writer(f)
-        writer.writerow(csv_header)
-        for e in energies:
-            writer.writerow(csv_rows[e])
-
-    return png_name
+    return _fig_to_b64(fig)
 
 
 def _rwork_rfree_fig(
     results: dict[tuple[int, int], PhenixResult],
     energies: list[int],
     wedges: list[int],
-    plots_dir: Path,
-    data_dir: Path,
 ) -> str:
-    """Save R-work / R-free vs energy PNG + CSV. Returns PNG filename."""
+    """Render R-work / R-free vs energy figure. Returns base64 PNG."""
     colors = cm.tab10.colors
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(11, 4))
     fig.suptitle("R-work and R-free vs Energy")
-
-    csv_header = ["energy_eV"]
-    csv_rows: dict[int, list] = {e: [e] for e in energies}
 
     for wi, images in enumerate(sorted(wedges)):
         xs_rw, ys_rw, xs_rf, ys_rf = [], [], [], []
@@ -205,15 +140,6 @@ def _rwork_rfree_fig(
         if xs_rf:
             ax2.plot(xs_rf, ys_rf, marker="o", color=c, label=f"{images} img")
 
-        csv_header += [f"{images}img_r_work", f"{images}img_r_free"]
-        rw_map = dict(zip(xs_rw, ys_rw))
-        rf_map = dict(zip(xs_rf, ys_rf))
-        for e in energies:
-            csv_rows[e] += [
-                f"{rw_map[e]:.6g}" if e in rw_map else "",
-                f"{rf_map[e]:.6g}" if e in rf_map else "",
-            ]
-
     for ax, lbl in ((ax1, "R-work"), (ax2, "R-free")):
         ax.set_xlabel("Energy (eV)")
         ax.set_ylabel(lbl)
@@ -224,16 +150,15 @@ def _rwork_rfree_fig(
                   borderaxespad=0, fontsize="small")
 
     plt.tight_layout()
-    fig.savefig(plots_dir / "rwork_rfree.png", dpi=100, bbox_inches="tight")
+    return _fig_to_b64(fig)
+
+
+def _fig_to_b64(fig) -> str:
+    buf = BytesIO()
+    fig.savefig(buf, format='png', dpi=100, bbox_inches='tight')
     plt.close(fig)
-
-    with open(data_dir / "rwork_rfree.csv", "w", newline="") as f:
-        writer = csv.writer(f)
-        writer.writerow(csv_header)
-        for e in energies:
-            writer.writerow(csv_rows[e])
-
-    return "rwork_rfree.png"
+    buf.seek(0)
+    return base64.b64encode(buf.read()).decode()
 
 
 def _summary_table(
@@ -254,8 +179,8 @@ def _summary_table(
         res = results.get((energy, images))
         if res is None:
             continue
-        rw = f"{res.r_work_final:.4f}" if res.r_work_final is not None else "\u2014"
-        rf = f"{res.r_free_final:.4f}" if res.r_free_final is not None else "\u2014"
+        rw = f"{res.r_work_final:.4f}" if res.r_work_final is not None else "—"
+        rf = f"{res.r_free_final:.4f}" if res.r_free_final is not None else "—"
         vals = ""
         sel_to_g = {g.selection: g for g in res.groups}
         for sel in groups:
@@ -263,7 +188,7 @@ def _summary_table(
             if g:
                 vals += f"<td>{g.f_prime:.3f} / {g.f_double_prime:.3f}</td>"
             else:
-                vals += "<td>\u2014</td>"
+                vals += "<td>—</td>"
         rows.append(f"<tr><td>{energy}</td><td>{rw}</td><td>{rf}</td>{vals}</tr>")
 
     return (
@@ -294,8 +219,8 @@ def generate_report(
     crystal_name: str = "",
 ) -> str:
     """
-    Generate PNG plots, CSV data files, and an HTML report inside *out_dir*.
-
+    Generate a self-contained HTML report inside *out_dir*.
+    Plots are embedded as base64; no external PNG or CSV files are written.
     Returns the path to index.html as a string.
     Raises ValueError if *results* is empty.
     """
@@ -309,15 +234,11 @@ def generate_report(
             "that the refinement jobs have completed."
         )
 
-    plots_dir = out_dir / "plots"
-    data_dir  = out_dir / "data"
-    plots_dir.mkdir(parents=True, exist_ok=True)
-    data_dir.mkdir(parents=True, exist_ok=True)
+    out_dir.mkdir(parents=True, exist_ok=True)
 
     energies = sorted({e for e, _ in results})
     wedges   = sorted({i for _, i in results})
 
-    # Determine a stable group order from the result with the lowest energy.
     first_key = min(results)
     groups: list[str] = [g.selection for g in results[first_key].groups]
     seen = set(groups)
@@ -332,42 +253,34 @@ def generate_report(
     group_summary_sections: list[str] = []
     for sel in groups:
         label = group_short_label(sel)
-        fname_stem = f"summary_{label}"
-        png = _group_summary_fig(results, energies, wedges, sel,
-                                 plots_dir, data_dir, fname_stem)
+        b64 = _group_summary_fig(results, energies, wedges, sel)
         group_summary_sections.append(
-            f'<h2 id="{_html.escape(fname_stem)}">Summary \u2014 {_html.escape(label)} (all wedges)</h2>\n'
-            f'<a href="plots/{png}"><img src="plots/{png}" alt="Summary {label}"></a>\n'
-            f'<p><a href="data/{fname_stem}.csv">Download CSV</a></p>'
+            f'<h2 id="summary_{_html.escape(label)}">Summary — {_html.escape(label)} (all wedges)</h2>\n'
+            f'<img src="data:image/png;base64,{b64}" alt="Summary {_html.escape(label)}">'
         )
 
     # ---- R-work / R-free vs energy ----
     progress("Generating R-work/R-free plot…")
-    rr_png = _rwork_rfree_fig(results, energies, wedges, plots_dir, data_dir)
+    rr_b64 = _rwork_rfree_fig(results, energies, wedges)
     rr_section = (
         '<h2 id="rwork_rfree">R-work and R-free vs Energy</h2>\n'
-        f'<a href="plots/{rr_png}"><img src="plots/{rr_png}" alt="Rwork Rfree"></a>\n'
-        '<p><a href="data/rwork_rfree.csv">Download CSV</a></p>'
+        f'<img src="data:image/png;base64,{rr_b64}" alt="Rwork Rfree">'
     )
 
     # ---- Per-wedge plots ----
     wedge_sections: list[str] = []
     for images in wedges:
-        progress(f"Generating wedge plot: {images} images\u2026")
-        fname_stem = f"wedge_{images}img"
-        png   = _wedge_fig(results, energies, images, groups,
-                           plots_dir, data_dir, fname_stem)
+        progress(f"Generating wedge plot: {images} images…")
+        b64   = _wedge_fig(results, energies, images, groups)
         table = _summary_table(results, energies, images, groups)
         wedge_sections.append(
-            f'<h2 id="{fname_stem}">{images} images</h2>\n'
-            f'<a href="plots/{png}"><img src="plots/{png}" alt="{images} images"></a>\n'
-            f'<p><a href="data/{fname_stem}.csv">Download CSV</a></p>\n'
+            f'<h2 id="wedge_{images}img">{images} images</h2>\n'
+            f'<img src="data:image/png;base64,{b64}" alt="{images} images">\n'
             + table
         )
 
     # ---- HTML ----
-    progress("Writing HTML report\u2026")
-    out_dir.mkdir(parents=True, exist_ok=True)
+    progress("Writing HTML report…")
     html_path = out_dir / "index.html"
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
@@ -383,36 +296,14 @@ def generate_report(
         breadcrumb_parts.append(f'<a href="../../index.html">{_html.escape(crystal_name)}</a>')
     elif crystal_name:
         breadcrumb_parts.append(_html.escape(crystal_name))
-    breadcrumb_parts.append(f"SPREAD {_html.escape(pipeline)} \u2014 {out_dir.name}")
+    breadcrumb_parts.append(f"SPREAD {_html.escape(pipeline)} — {out_dir.name}")
     breadcrumb = " / ".join(breadcrumb_parts)
 
-    # Table of contents
-    toc_items = [f'<li><a href="#{group_short_label(s)}">Summary {group_short_label(s)}</a></li>' for s in groups]
+    toc_items = [f'<li><a href="#summary_{group_short_label(s)}">Summary {group_short_label(s)}</a></li>' for s in groups]
     toc_items.append('<li><a href="#rwork_rfree">R-work / R-free</a></li>')
     toc_items += [f'<li><a href="#wedge_{w}img">{w} images</a></li>' for w in wedges]
     toc = "<ul>" + "".join(toc_items) + "</ul>"
 
-    # Metadata rows
-    meta_rows = []
-    if pdb_model:
-        meta_rows.append(f"<tr><td>PDB model</td><td>{_html.escape(pdb_model)}</td></tr>")
-    if anomalous_def:
-        meta_rows.append(f"<tr><td>Anomalous groups</td><td>{_html.escape(anomalous_def)}</td></tr>")
-    if macro_cycles:
-        meta_rows.append(f"<tr><td>Macro cycles</td><td>{macro_cycles}</td></tr>")
-    meta_rows.append(f"<tr><td>Pipeline</td><td>{_html.escape(pipeline)}</td></tr>")
-    meta_rows.append(f"<tr><td>Run</td><td>{run}</td></tr>")
-    meta_rows.append(f"<tr><td>Processing path</td><td>{_html.escape(proc_path)}</td></tr>")
-    meta_table = (
-        "<table style='border-collapse:collapse;font-size:13px;margin-bottom:16px;'>"
-        + "".join(
-            f"<tr><th style='text-align:left;padding:3px 12px 3px 0;color:#555;'>{r.split('<td>')[1].split('</td>')[0]}</th>"
-            f"<td style='padding:3px 0;'>{r.split('</td><td>')[1].split('</td>')[0]}</td></tr>"
-            for r in meta_rows
-        )
-        + "</table>"
-    )
-    # simpler approach:
     meta_lines = []
     if pdb_model:
         meta_lines.append(f"<b>PDB model:</b> {_html.escape(pdb_model)}")
@@ -429,7 +320,7 @@ def generate_report(
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>SPREAD Analysis \u2014 {_html.escape(pipeline)} run {run}</title>
+<title>SPREAD Analysis — {_html.escape(pipeline)} run {run}</title>
 <style>
 body {{ font-family: Arial, sans-serif; max-width: 1600px; margin: 0 auto; padding: 16px; color: #222; }}
 h1 {{ color: #1a4a8a; }}

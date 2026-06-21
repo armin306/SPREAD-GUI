@@ -812,8 +812,8 @@ done
         return f"""#!/bin/bash
 . /etc/profile.d/modules.sh
 #SBATCH --job-name=autoPROC_job
-#SBATCH --output=slurm-%j.out
-#SBATCH --error=slurm-%j.err
+#SBATCH --output=/dev/null
+#SBATCH --error=/dev/null
 #SBATCH --partition=cs04r,cs05r
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=16
@@ -863,8 +863,8 @@ process -M DiamondI23 \\
         return f"""#!/bin/bash
 . /etc/profile.d/modules.sh
 #SBATCH --job-name=xia2_dials_job
-#SBATCH --output=slurm-%j.out
-#SBATCH --error=slurm-%j.err
+#SBATCH --output=/dev/null
+#SBATCH --error=/dev/null
 #SBATCH --partition=cs04r,cs05r
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=16
@@ -911,14 +911,15 @@ xia2 pipeline=dials \\
   unit_cell="{cell.as_autoproc_string()}" \\
   project={project} \\
   crystal={crystal}
+rm -rf DEFAULT
 """
 
     def _make_xia2_3dii_job(self, data_dir: str, cell: Cell, sg: str, project: str, crystal: str, total_images: int) -> str:
         return f"""#!/bin/bash
 . /etc/profile.d/modules.sh
 #SBATCH --job-name=xia2_3dii_job
-#SBATCH --output=slurm-%j.out
-#SBATCH --error=slurm-%j.err
+#SBATCH --output=/dev/null
+#SBATCH --error=/dev/null
 #SBATCH --partition=cs04r,cs05r
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=16
@@ -965,6 +966,7 @@ xia2 pipeline=3dii \\
   unit_cell="{cell.as_autoproc_string()}" \\
   project={project} \\
   crystal={crystal}
+rm -rf DEFAULT
 """
 
     # ---------------- New project ----------------

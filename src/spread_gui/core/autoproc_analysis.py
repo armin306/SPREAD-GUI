@@ -1,20 +1,20 @@
 """
 Scan a processing directory for autoPROC results, generate matplotlib plots,
-and write an HTML report.
+and write a self-contained HTML report (plots embedded as base64).
 
 Directory layout expected:
     proc_path/
         {energy}eV/
             {images}img/
                 aP.log          <- main autoPROC log (written by the job script)
-                autoPROC/       <- autoPROC output directory
 """
 from __future__ import annotations
 
-import csv
+import base64
 import html as _html
 import re
 from datetime import datetime
+from io import BytesIO
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -58,12 +58,10 @@ def collect_results(proc_path: Path, pipeline: str = "autoPROC") -> ResultMap:
             if not wm or not wentry.is_dir():
                 continue
             wedge = int(wm.group(1))
-            # aP.log sits in the images dir (redirected from process command)
             ap_log = wentry / "aP.log"
             if ap_log.exists():
                 results[energy][wedge] = parse_autoproc_log(ap_log)
             else:
-                # Directory exists but no log yet (job still running)
                 autoproc_dir = wentry / "autoPROC"
                 if autoproc_dir.is_dir():
                     results[energy][wedge] = None
@@ -97,13 +95,11 @@ def generate_report(
     results_path: str = "",
 ) -> str:
     """
-    Generate PNG plots, CSV data files, and an HTML report inside *out_dir*.
+    Generate a self-contained HTML report inside *out_dir*.
+    Plots are embedded as base64; no external PNG or CSV files are written.
     Returns the absolute path to index.html.
     """
-    plots_dir = out_dir / "plots"
-    data_dir  = out_dir / "data"
-    plots_dir.mkdir(parents=True, exist_ok=True)
-    data_dir.mkdir(parents=True, exist_ok=True)
+    out_dir.mkdir(parents=True, exist_ok=True)
 
     energies = sorted(results.keys())
     wedge_set: set[int] = set()
@@ -159,90 +155,51 @@ def generate_report(
         if n_e > 1:
             ax.legend(fontsize=6, loc='best')
 
+    def _fig_to_b64(fig) -> str:
+        buf = BytesIO()
+        fig.savefig(buf, format='png', dpi=100, bbox_inches='tight')
+        plt.close(fig)
+        buf.seek(0)
+        return base64.b64encode(buf.read()).decode()
+
+    # Accumulate (section_title, base64_png)
     plot_files: list[tuple[str, str]] = []
 
-    def _save_csv_1(attr: str, idx: Optional[int], csv_name: str) -> None:
-        header = ["wedge_img"] + [f"{e}_eV" for e in energies]
-        rows = []
-        for w in wedges:
-            row = [w]
-            for e in energies:
-                stats = results[e].get(w)
-                val = _get(stats, attr, idx) if stats else None
-                row.append(f"{val:.6g}" if val is not None else "")
-            rows.append(row)
-        with open(data_dir / csv_name, "w", newline="") as f:
-            writer = csv.writer(f)
-            writer.writerow(header)
-            writer.writerows(rows)
-
-    def _save_csv_3(attr: str, csv_name: str) -> None:
-        shells = ["overall", "low", "high"]
-        header = ["wedge_img"] + [f"{e}_eV_{s}" for e in energies for s in shells]
-        rows = []
-        for w in wedges:
-            row = [w]
-            for e in energies:
-                stats = results[e].get(w)
-                for idx in range(3):
-                    val = _get(stats, attr, idx) if stats else None
-                    row.append(f"{val:.6g}" if val is not None else "")
-            rows.append(row)
-        with open(data_dir / csv_name, "w", newline="") as f:
-            writer = csv.writer(f)
-            writer.writerow(header)
-            writer.writerows(rows)
-
-    def _save_1panel(attr: str, idx: Optional[int], title: str, ylabel: str,
-                     fname: str, csv_name: str) -> None:
+    def _render_1panel(attr: str, idx: Optional[int], title: str, ylabel: str) -> None:
         fig, ax = plt.subplots(figsize=(7, 4))
         _plot_panel(ax, attr, idx, title, ylabel)
         fig.tight_layout()
-        fig.savefig(plots_dir / fname, dpi=100, bbox_inches='tight')
-        plt.close(fig)
-        plot_files.append((title, fname))
-        log(f"  {fname}")
-        _save_csv_1(attr, idx, csv_name)
+        plot_files.append((title, _fig_to_b64(fig)))
+        log(f"  {title}")
 
-    def _save_3panel(attr: str, title: str, ylabel: str,
-                     fname: str, csv_name: str) -> None:
+    def _render_3panel(attr: str, title: str, ylabel: str) -> None:
         fig, axes = plt.subplots(1, 3, figsize=(15, 4))
         for j, shell in enumerate(("Overall", "Low shell", "High shell")):
             _plot_panel(axes[j], attr, j, f"{title} — {shell}", ylabel)
         fig.tight_layout()
-        fig.savefig(plots_dir / fname, dpi=100, bbox_inches='tight')
-        plt.close(fig)
-        plot_files.append((title, fname))
-        log(f"  {fname}")
-        _save_csv_3(attr, csv_name)
+        plot_files.append((title, _fig_to_b64(fig)))
+        log(f"  {title}")
 
     # -----------------------------------------------------------------------
-    # Generate all plots + CSVs
+    # Generate all plots
     # -----------------------------------------------------------------------
-    log("Generating plots and CSV files…")
+    log("Generating plots…")
 
-    _save_1panel("high_res",                  0,    "High resolution limit (STARANISO)", "d (Å)",           "high_res.png",           "high_res.csv")
-    _save_1panel("completeness_ellip",        0,    "Completeness (ellipsoidal)",         "Completeness (%)", "completeness.png",       "completeness.csv")
-    _save_1panel("multiplicity",              0,    "Multiplicity",                       "Multiplicity",    "multiplicity.png",        "multiplicity.csv")
-    _save_3panel("i_over_sigma",                    "I/σ(I)",                             "I/σ(I)",          "i_sigma.png",             "i_sigma.csv")
-    _save_3panel("rmerge",                          "Rmerge (all I+ & I-)",               "Rmerge",          "rmerge.png",              "rmerge.csv")
-    _save_3panel("cc_half",                         "CC½",                                "CC½",             "cc_half.png",             "cc_half.csv")
-    _save_3panel("anom_completeness_ellip",         "Anomalous completeness (ellipsoidal)", "Completeness (%)", "anom_completeness.png", "anom_completeness.csv")
-    _save_3panel("anom_multiplicity",               "Anomalous multiplicity",             "Multiplicity",    "anom_multiplicity.png",   "anom_multiplicity.csv")
+    _render_1panel("high_res",               0,    "High resolution limit (STARANISO)", "d (Å)")
+    _render_1panel("completeness_ellip",     0,    "Completeness (ellipsoidal)",        "Completeness (%)")
+    _render_1panel("multiplicity",           0,    "Multiplicity",                      "Multiplicity")
+    _render_3panel("i_over_sigma",                 "I/σ(I)",                            "I/σ(I)")
+    _render_3panel("rmerge",                       "Rmerge (all I+ & I-)",              "Rmerge")
+    _render_3panel("cc_half",                      "CC½",                               "CC½")
+    _render_3panel("anom_completeness_ellip",      "Anomalous completeness (ellipsoidal)", "Completeness (%)")
+    _render_3panel("anom_multiplicity",            "Anomalous multiplicity",            "Multiplicity")
 
-    # Unit cell — 2×3 grid (a, b, c / α, β, γ)
-    log("  unit_cell.png")
-    _make_unit_cell_plot(results, energies, wedges, colors, plots_dir)
-    plot_files.append(("Unit cell parameters", "unit_cell.png"))
-    _save_unit_cell_csv(results, energies, wedges, data_dir)
+    log("  Unit cell parameters")
+    plot_files.append(("Unit cell parameters", _render_unit_cell(results, energies, wedges, colors)))
 
-    # Diffraction limits along a*, b*, c* axes (extra plot vs xia2)
-    log("  diff_limits.png")
-    _make_diff_limits_plot(results, energies, wedges, colors, plots_dir)
-    plot_files.append(("Diffraction limits (STARANISO)", "diff_limits.png"))
-    _save_diff_limits_csv(results, energies, wedges, data_dir)
+    log("  Diffraction limits (STARANISO)")
+    plot_files.append(("Diffraction limits (STARANISO)", _render_diff_limits(results, energies, wedges, colors)))
 
-    # HTML report
     log("Writing HTML report…")
     html_path = out_dir / "index.html"
     _write_html(
@@ -255,16 +212,10 @@ def generate_report(
 
 
 # ---------------------------------------------------------------------------
-# Unit cell plot + CSV
+# Standalone plot renderers
 # ---------------------------------------------------------------------------
 
-def _make_unit_cell_plot(
-    results: ResultMap,
-    energies: list[int],
-    wedges: list[int],
-    colors: list,
-    plots_dir: Path,
-) -> None:
+def _render_unit_cell(results: ResultMap, energies: list[int], wedges: list[int], colors: list) -> str:
     params = [
         ("cell_a",     "a (Å)"),
         ("cell_b",     "b (Å)"),
@@ -299,39 +250,14 @@ def _make_unit_cell_plot(
             ax.legend(fontsize=6, loc='best')
     fig.suptitle("Unit cell parameters", fontsize=11)
     fig.tight_layout()
-    fig.savefig(plots_dir / "unit_cell.png", dpi=100, bbox_inches='tight')
+    buf = BytesIO()
+    fig.savefig(buf, format='png', dpi=100, bbox_inches='tight')
     plt.close(fig)
+    buf.seek(0)
+    return base64.b64encode(buf.read()).decode()
 
 
-def _save_unit_cell_csv(results, energies, wedges, data_dir):
-    params = ["cell_a", "cell_b", "cell_c", "cell_alpha", "cell_beta", "cell_gamma"]
-    header = ["wedge_img"] + [f"{e}_eV_{p}" for e in energies for p in params]
-    rows = []
-    for w in wedges:
-        row = [w]
-        for e in energies:
-            stats = results[e].get(w)
-            for p in params:
-                val = getattr(stats, p, None) if stats else None
-                row.append(f"{val:.6g}" if val is not None else "")
-        rows.append(row)
-    with open(data_dir / "unit_cell.csv", "w", newline="") as f:
-        writer = csv.writer(f)
-        writer.writerow(header)
-        writer.writerows(rows)
-
-
-# ---------------------------------------------------------------------------
-# Diffraction limits plot + CSV
-# ---------------------------------------------------------------------------
-
-def _make_diff_limits_plot(
-    results: ResultMap,
-    energies: list[int],
-    wedges: list[int],
-    colors: list,
-    plots_dir: Path,
-) -> None:
+def _render_diff_limits(results: ResultMap, energies: list[int], wedges: list[int], colors: list) -> str:
     axes_info = [
         ("diff_limit_astar", "a*"),
         ("diff_limit_bstar", "b*"),
@@ -363,31 +289,20 @@ def _make_diff_limits_plot(
             ax.legend(fontsize=6, loc='best')
     fig.suptitle("Diffraction limits (STARANISO principal axes)", fontsize=11)
     fig.tight_layout()
-    fig.savefig(plots_dir / "diff_limits.png", dpi=100, bbox_inches='tight')
+    buf = BytesIO()
+    fig.savefig(buf, format='png', dpi=100, bbox_inches='tight')
     plt.close(fig)
-
-
-def _save_diff_limits_csv(results, energies, wedges, data_dir):
-    attrs = ["diff_limit_astar", "diff_limit_bstar", "diff_limit_cstar"]
-    header = ["wedge_img"] + [f"{e}_eV_{a}" for e in energies for a in attrs]
-    rows = []
-    for w in wedges:
-        row = [w]
-        for e in energies:
-            stats = results[e].get(w)
-            for a in attrs:
-                val = getattr(stats, a, None) if stats else None
-                row.append(f"{val:.6g}" if val is not None else "")
-        rows.append(row)
-    with open(data_dir / "diff_limits.csv", "w", newline="") as f:
-        writer = csv.writer(f)
-        writer.writerow(header)
-        writer.writerows(rows)
+    buf.seek(0)
+    return base64.b64encode(buf.read()).decode()
 
 
 # ---------------------------------------------------------------------------
 # HTML generation
 # ---------------------------------------------------------------------------
+
+def _anchor(title: str) -> str:
+    return re.sub(r'[^a-z0-9]+', '_', title.lower()).strip('_')
+
 
 def _summary_table_html(results, energies, wedges) -> str:
     header = (
@@ -459,18 +374,12 @@ def _write_html(
     for energy in energies:
         cells = [f"<td>{energy} eV</td>"]
         for w in wedges:
-            summary_html = proc_path / f"{energy}eV" / f"{w}img" / "autoPROC" / "summary.html"
-            if summary_html.exists():
-                link_open  = f'<a href="file://{summary_html}" target="_blank">'
-                link_close = '</a>'
-            else:
-                link_open = link_close = ''
             if w not in results[energy]:
                 cells.append('<td class="na">—</td>')
             elif results[energy][w] is None:
-                cells.append(f'<td class="fail">{link_open}&#x2717; Failed{link_close}</td>')
+                cells.append('<td class="fail">&#x2717; Failed</td>')
             else:
-                cells.append(f'<td class="ok">{link_open}&#x2713; OK{link_close}</td>')
+                cells.append('<td class="ok">&#x2713; OK</td>')
         rows.append("<tr>" + "".join(cells) + "</tr>")
 
     status_table = (
@@ -481,13 +390,13 @@ def _write_html(
     )
 
     toc = "".join(
-        f'<li><a href="#{fn}">{_html.escape(t)}</a></li>'
-        for t, fn in plot_files
+        f'<li><a href="#{_anchor(t)}">{_html.escape(t)}</a></li>'
+        for t, _ in plot_files
     )
     plot_sections = "".join(
-        f'<h3 id="{fn}">{_html.escape(t)}</h3>'
-        f'<a href="plots/{fn}"><img src="plots/{fn}" alt="{_html.escape(t)}"></a>'
-        for t, fn in plot_files
+        f'<h3 id="{_anchor(t)}">{_html.escape(t)}</h3>'
+        f'<img src="data:image/png;base64,{b64}" alt="{_html.escape(t)}">'
+        for t, b64 in plot_files
     )
 
     summary_table = _summary_table_html(results, energies, wedges)

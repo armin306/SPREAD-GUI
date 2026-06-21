@@ -1,6 +1,6 @@
 """
 Scan a processing directory for xia2 results, generate matplotlib plots,
-and write an HTML report.
+and write a self-contained HTML report (plots embedded as base64).
 
 Directory layout expected:
     proc_path/
@@ -11,15 +11,14 @@ Directory layout expected:
 """
 from __future__ import annotations
 
-import csv
+import base64
 import html as _html
 import re
 from datetime import datetime
+from io import BytesIO
 from pathlib import Path
 from typing import Callable, Optional
 
-# Use the non-interactive Agg backend before importing pyplot so that no
-# display connection is required (runs fine in a QThread).
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
@@ -95,14 +94,11 @@ def generate_report(
     results_path: str = "",
 ) -> str:
     """
-    Generate PNG plots, CSV data files, and an HTML report inside *out_dir*.
-    Calls *log* with progress messages.
+    Generate a self-contained HTML report inside *out_dir*.
+    Plots are embedded as base64; no external PNG or CSV files are written.
     Returns the absolute path to index.html.
     """
-    plots_dir = out_dir / "plots"
-    data_dir  = out_dir / "data"
-    plots_dir.mkdir(parents=True, exist_ok=True)
-    data_dir.mkdir(parents=True, exist_ok=True)
+    out_dir.mkdir(parents=True, exist_ok=True)
 
     energies = sorted(results.keys())
     wedge_set: set[int] = set()
@@ -117,7 +113,6 @@ def generate_report(
     log(f"Energies  : {', '.join(str(e) + ' eV' for e in energies)}")
     log(f"Wedge sizes: {', '.join(str(w) for w in wedges)}")
 
-    # Choose a qualitative colormap with enough distinct colours.
     cmap_name = 'tab10' if n_e <= 10 else 'tab20'
     cmap = plt.cm.get_cmap(cmap_name)
     colors = [cmap(i / max(n_e - 1, 1)) for i in range(n_e)]
@@ -127,7 +122,6 @@ def generate_report(
     # -------------------------------------------------------------------
 
     def _get(stats: Xia2Stats, attr: str, idx: Optional[int]) -> Optional[float]:
-        """Extract a single float from a Stats3 tuple (idx=0/1/2) or scalar (idx=None)."""
         v = getattr(stats, attr, None)
         if v is None:
             return None
@@ -137,13 +131,7 @@ def generate_report(
             return v[idx]
         return None
 
-    def _plot_panel(
-        ax,
-        attr: str,
-        idx: Optional[int],
-        title: str,
-        ylabel: str,
-    ) -> None:
+    def _plot_panel(ax, attr: str, idx: Optional[int], title: str, ylabel: str) -> None:
         for i, energy in enumerate(energies):
             xs, ys = [], []
             for w in wedges:
@@ -166,87 +154,49 @@ def generate_report(
         if n_e > 1:
             ax.legend(fontsize=6, loc='best')
 
-    # Accumulate (section_title, filename) for the HTML table of contents.
+    def _fig_to_b64(fig) -> str:
+        buf = BytesIO()
+        fig.savefig(buf, format='png', dpi=100, bbox_inches='tight')
+        plt.close(fig)
+        buf.seek(0)
+        return base64.b64encode(buf.read()).decode()
+
+    # Accumulate (section_title, base64_png) for the HTML
     plot_files: list[tuple[str, str]] = []
 
-    def _save_csv_1(attr: str, idx: Optional[int], csv_name: str) -> None:
-        """Save one CSV: rows=wedge sizes, columns=energies."""
-        rows = []
-        header = ["wedge_img"] + [f"{e}_eV" for e in energies]
-        for w in wedges:
-            row = [w]
-            for e in energies:
-                stats = results[e].get(w)
-                val = _get(stats, attr, idx) if stats else None
-                row.append(f"{val:.6g}" if val is not None else "")
-            rows.append(row)
-        with open(data_dir / csv_name, "w", newline="") as f:
-            writer = csv.writer(f)
-            writer.writerow(header)
-            writer.writerows(rows)
-
-    def _save_csv_3(attr: str, csv_name: str) -> None:
-        """Save one CSV with overall/low/high shell columns for each energy."""
-        shells = ["overall", "low", "high"]
-        header = ["wedge_img"] + [f"{e}_eV_{s}" for e in energies for s in shells]
-        rows = []
-        for w in wedges:
-            row = [w]
-            for e in energies:
-                stats = results[e].get(w)
-                for idx in range(3):
-                    val = _get(stats, attr, idx) if stats else None
-                    row.append(f"{val:.6g}" if val is not None else "")
-            rows.append(row)
-        with open(data_dir / csv_name, "w", newline="") as f:
-            writer = csv.writer(f)
-            writer.writerow(header)
-            writer.writerows(rows)
-
-    def _save_1panel(attr: str, idx: Optional[int], title: str, ylabel: str,
-                     fname: str, csv_name: str) -> None:
+    def _render_1panel(attr: str, idx: Optional[int], title: str, ylabel: str) -> None:
         fig, ax = plt.subplots(figsize=(7, 4))
         _plot_panel(ax, attr, idx, title, ylabel)
         fig.tight_layout()
-        fig.savefig(plots_dir / fname, dpi=100, bbox_inches='tight')
-        plt.close(fig)
-        plot_files.append((title, fname))
-        log(f"  {fname}")
-        _save_csv_1(attr, idx, csv_name)
+        plot_files.append((title, _fig_to_b64(fig)))
+        log(f"  {title}")
 
-    def _save_3panel(attr: str, title: str, ylabel: str,
-                     fname: str, csv_name: str) -> None:
+    def _render_3panel(attr: str, title: str, ylabel: str) -> None:
         fig, axes = plt.subplots(1, 3, figsize=(15, 4))
         for j, shell in enumerate(("Overall", "Low shell", "High shell")):
             _plot_panel(axes[j], attr, j, f"{title} — {shell}", ylabel)
         fig.tight_layout()
-        fig.savefig(plots_dir / fname, dpi=100, bbox_inches='tight')
-        plt.close(fig)
-        plot_files.append((title, fname))
-        log(f"  {fname}")
-        _save_csv_3(attr, csv_name)
+        plot_files.append((title, _fig_to_b64(fig)))
+        log(f"  {title}")
 
     # -------------------------------------------------------------------
-    # Generate all plots + CSVs
+    # Generate all plots
     # -------------------------------------------------------------------
-    log("Generating plots and CSV files…")
+    log("Generating plots…")
 
-    _save_1panel("high_res",       0,    "High resolution limit",    "d (Å)",          "high_res.png",          "high_res.csv")
-    _save_1panel("completeness",   0,    "Completeness",             "Completeness (%)", "completeness.png",    "completeness.csv")
-    _save_1panel("multiplicity",   0,    "Multiplicity",             "Multiplicity",   "multiplicity.png",      "multiplicity.csv")
-    _save_3panel("i_over_sigma",         "I/σ(I)",                   "I/σ(I)",         "i_sigma.png",           "i_sigma.csv")
-    _save_3panel("rmerge_ipm",           "Rmerge(I+/-)",             "Rmerge",         "rmerge_ipm.png",        "rmerge_ipm.csv")
-    _save_3panel("cc_half",              "CC½",                      "CC½",            "cc_half.png",           "cc_half.csv")
-    _save_1panel("wilson_b",       None, "Wilson B factor",          "B (Å²)",         "wilson_b.png",          "wilson_b.csv")
-    _save_3panel("anom_completeness",    "Anomalous completeness",   "Completeness (%)", "anom_completeness.png", "anom_completeness.csv")
-    _save_3panel("anom_multiplicity",    "Anomalous multiplicity",   "Multiplicity",   "anom_multiplicity.png", "anom_multiplicity.csv")
-    _save_1panel("anom_slope",     None, "Anomalous slope",          "Slope",          "anom_slope.png",        "anom_slope.csv")
+    _render_1panel("high_res",       0,    "High resolution limit",  "d (Å)")
+    _render_1panel("completeness",   0,    "Completeness",           "Completeness (%)")
+    _render_1panel("multiplicity",   0,    "Multiplicity",           "Multiplicity")
+    _render_3panel("i_over_sigma",         "I/σ(I)",                 "I/σ(I)")
+    _render_3panel("rmerge_ipm",           "Rmerge(I+/-)",           "Rmerge")
+    _render_3panel("cc_half",              "CC½",                    "CC½")
+    _render_1panel("wilson_b",       None, "Wilson B factor",        "B (Å²)")
+    _render_3panel("anom_completeness",    "Anomalous completeness", "Completeness (%)")
+    _render_3panel("anom_multiplicity",    "Anomalous multiplicity", "Multiplicity")
+    _render_1panel("anom_slope",     None, "Anomalous slope",        "Slope")
 
-    # Unit cell — 2×3 grid (a, b, c / α, β, γ)
-    log("  unit_cell.png")
-    _make_unit_cell_plot(results, energies, wedges, colors, plots_dir)
-    plot_files.append(("Unit cell parameters", "unit_cell.png"))
-    _save_unit_cell_csv(results, energies, wedges, data_dir)
+    log("  Unit cell parameters")
+    plot_files.append(("Unit cell parameters", _render_unit_cell(results, energies, wedges, colors)))
 
     # -------------------------------------------------------------------
     # HTML report
@@ -263,16 +213,16 @@ def generate_report(
 
 
 # ---------------------------------------------------------------------------
-# Unit cell plot + CSV
+# Unit cell plot
 # ---------------------------------------------------------------------------
 
-def _make_unit_cell_plot(
+def _render_unit_cell(
     results: ResultMap,
     energies: list[int],
     wedges: list[int],
     colors: list,
-    plots_dir: Path,
-) -> None:
+) -> str:
+    """Render the 2×3 unit cell grid and return a base64 PNG string."""
     params = [
         ("cell_a",     "a (Å)"),
         ("cell_b",     "b (Å)"),
@@ -308,43 +258,26 @@ def _make_unit_cell_plot(
 
     fig.suptitle("Unit cell parameters", fontsize=11)
     fig.tight_layout()
-    fig.savefig(plots_dir / "unit_cell.png", dpi=100, bbox_inches='tight')
+    buf = BytesIO()
+    fig.savefig(buf, format='png', dpi=100, bbox_inches='tight')
     plt.close(fig)
-
-
-def _save_unit_cell_csv(
-    results: ResultMap,
-    energies: list[int],
-    wedges: list[int],
-    data_dir: Path,
-) -> None:
-    params = ["cell_a", "cell_b", "cell_c", "cell_alpha", "cell_beta", "cell_gamma"]
-    header = ["wedge_img"] + [f"{e}_eV_{p}" for e in energies for p in params]
-    rows = []
-    for w in wedges:
-        row = [w]
-        for e in energies:
-            stats = results[e].get(w)
-            for p in params:
-                val = getattr(stats, p, None) if stats else None
-                row.append(f"{val:.6g}" if val is not None else "")
-        rows.append(row)
-    with open(data_dir / "unit_cell.csv", "w", newline="") as f:
-        writer = csv.writer(f)
-        writer.writerow(header)
-        writer.writerows(rows)
+    buf.seek(0)
+    return base64.b64encode(buf.read()).decode()
 
 
 # ---------------------------------------------------------------------------
 # HTML generation
 # ---------------------------------------------------------------------------
 
+def _anchor(title: str) -> str:
+    return re.sub(r'[^a-z0-9]+', '_', title.lower()).strip('_')
+
+
 def _summary_table_html(
     results: ResultMap,
     energies: list[int],
     wedges: list[int],
 ) -> str:
-    """Numerical summary: best resolution and completeness per energy/wedge."""
     header = (
         "<tr><th>Energy (eV)</th><th>Wedge (img)</th>"
         "<th>Resolution (Å)</th><th>Completeness (%)</th>"
@@ -372,9 +305,7 @@ def _summary_table_html(
                 f"<td>{_f(stats.rmerge_ipm, 0)}</td>"
                 f"</tr>"
             )
-    return (
-        "<table>" + header + "".join(rows) + "</table>"
-    )
+    return "<table>" + header + "".join(rows) + "</table>"
 
 
 def _write_html(
@@ -397,7 +328,7 @@ def _write_html(
     proc_path = Path(proc_path_str)
 
     # Breadcrumb
-    crystal_index = out_dir.parent.parent.parent / "index.html"  # spread/{pipeline}/run_N → crystal
+    crystal_index = out_dir.parent.parent.parent / "index.html"
     proj_index    = crystal_index.parent / "index.html"
     breadcrumb_parts = []
     if proj_index.exists():
@@ -440,13 +371,13 @@ def _write_html(
 
     # ---- Plots section ----
     toc = "".join(
-        f'<li><a href="#{fn}">{_html.escape(t)}</a></li>'
-        for t, fn in plot_files
+        f'<li><a href="#{_anchor(t)}">{_html.escape(t)}</a></li>'
+        for t, _ in plot_files
     )
     plot_sections = "".join(
-        f'<h3 id="{fn}">{_html.escape(t)}</h3>'
-        f'<a href="plots/{fn}"><img src="plots/{fn}" alt="{_html.escape(t)}"></a>'
-        for t, fn in plot_files
+        f'<h3 id="{_anchor(t)}">{_html.escape(t)}</h3>'
+        f'<img src="data:image/png;base64,{b64}" alt="{_html.escape(t)}">'
+        for t, b64 in plot_files
     )
 
     summary_table = _summary_table_html(results, energies, wedges)

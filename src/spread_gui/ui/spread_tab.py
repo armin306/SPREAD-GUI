@@ -622,8 +622,8 @@ class SpreadTab(QWidget):
         return f"""#!/bin/bash
 . /etc/profile.d/modules.sh
 #SBATCH --job-name=phenix_job
-#SBATCH --output=slurm-%j.out
-#SBATCH --error=slurm-%j.err
+#SBATCH --output=/dev/null
+#SBATCH --error=/dev/null
 #SBATCH --partition=cs04r,cs05r
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4
