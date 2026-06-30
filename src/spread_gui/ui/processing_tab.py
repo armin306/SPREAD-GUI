@@ -1131,10 +1131,14 @@ xia2 pipeline=3dii \\
         if not ok or not password:
             return
         try:
-            setup_ssh_key(password)
+            output = setup_ssh_key(password)
         except Exception as e:
             self._warn("SSH key setup failed", str(e))
+            self._check_ssh_key_status()
             return
+        if output:
+            for line in output.splitlines():
+                self._log(f"[ssh-copy-id] {line}")
         self._check_ssh_key_status()
         self._log("SSH key copied to Wilson — future submissions will not require a password.")
 

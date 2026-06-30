@@ -45,11 +45,14 @@ def check_ssh_key_auth(gateway: str = _SLURM_GATEWAY) -> tuple[bool, str]:
     return False, msg
 
 
-def setup_ssh_key(password: str, gateway: str = _SLURM_GATEWAY) -> None:
+def setup_ssh_key(password: str, gateway: str = _SLURM_GATEWAY) -> str:
     """Copy the user's SSH public key to the gateway using a Qt-supplied password.
 
     The password is passed to ssh-copy-id via SSH_ASKPASS so it never appears
     on the terminal.  The temporary askpass script is deleted immediately after.
+
+    Returns the combined stdout+stderr from ssh-copy-id for display in the log.
+    Raises RuntimeError on failure or if no keys were installed.
     """
     config_dir = Path.home() / ".config" / "spread_gui"
     config_dir.mkdir(parents=True, exist_ok=True)
@@ -90,8 +93,22 @@ def setup_ssh_key(password: str, gateway: str = _SLURM_GATEWAY) -> None:
         except Exception:
             pass
 
+    combined = "\n".join(
+        part for part in (result.stdout.strip(), result.stderr.strip()) if part
+    )
+
     if result.returncode != 0:
-        raise RuntimeError(result.stderr.strip() or result.stdout.strip())
+        raise RuntimeError(combined or "ssh-copy-id exited with a non-zero status but produced no output.")
+
+    # ssh-copy-id exits 0 even when authentication succeeded but it had nothing
+    # to install (wrong password causes it to copy 0 keys).
+    if "Number of key(s) added: 0" in combined:
+        raise RuntimeError(
+            f"ssh-copy-id connected to {gateway} but installed 0 keys "
+            f"(wrong password, or all keys already present):\n{combined}"
+        )
+
+    return combined
 
 
 def get_slurm_jwt(lifespan: int = 300) -> str:
