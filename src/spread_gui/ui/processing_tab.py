@@ -1112,18 +1112,23 @@ xia2 pipeline=3dii \\
 
     # ---------------- New project ----------------
     # ---------------- SSH key helpers ----------------
-    def _check_ssh_key_status(self) -> None:
-        ok, err = check_ssh_key_auth()
+    def _check_ssh_key_status(self, log_verbose: bool = False) -> None:
+        ok, verbose_log = check_ssh_key_auth()
         if ok:
             self.ssh_key_status.setText("SSH key: OK (passwordless)")
             self.ssh_key_status.setStyleSheet("color:green;")
             self.ssh_key_status.setToolTip("")
             self.btn_setup_ssh_key.setText("Re-setup SSH key…")
         else:
-            self.ssh_key_status.setText("SSH key: auth failed — see tooltip")
+            self.ssh_key_status.setText("SSH key: auth failed — see log")
             self.ssh_key_status.setStyleSheet("color:#b05000;")
-            self.ssh_key_status.setToolTip(err or "SSH returned a non-zero exit code")
+            self.ssh_key_status.setToolTip("Publickey auth failed — see log panel for ssh -v output")
             self.btn_setup_ssh_key.setText("Setup SSH key…")
+            if log_verbose:
+                self._log("--- ssh -v diagnostic output ---")
+                for line in verbose_log.splitlines():
+                    self._log(line)
+                self._log("--- end ssh -v output ---")
 
     def _setup_ssh_key(self) -> None:
         self._log("Running ssh-copy-id — enter your Wilson password in the console when prompted.")
@@ -1136,7 +1141,7 @@ xia2 pipeline=3dii \\
         if output:
             for line in output.splitlines():
                 self._log(f"[ssh-copy-id] {line}")
-        self._check_ssh_key_status()
+        self._check_ssh_key_status(log_verbose=True)
         self._log("SSH key copied to Wilson — future submissions will not require a password.")
 
     def generate_scripts(self) -> None:

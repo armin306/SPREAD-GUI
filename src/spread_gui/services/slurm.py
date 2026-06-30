@@ -85,10 +85,15 @@ def chmod_x(path: str) -> None:
 
 
 def check_ssh_key_auth(gateway: str = _SLURM_GATEWAY) -> tuple[bool, str]:
-    """Return (success, message) for passwordless SSH to the gateway node."""
+    """Return (success, verbose_log) for passwordless SSH to the gateway node.
+
+    Always uses -v so the caller can log the full negotiation output and
+    see exactly why publickey auth succeeded or failed.
+    """
     result = subprocess.run(
         [
             "ssh",
+            "-v",
             "-o", "BatchMode=yes",
             "-o", "ConnectTimeout=5",
             "-o", "StrictHostKeyChecking=accept-new",
@@ -96,11 +101,10 @@ def check_ssh_key_auth(gateway: str = _SLURM_GATEWAY) -> tuple[bool, str]:
         ],
         capture_output=True,
         text=True,
+        timeout=15,
     )
-    if result.returncode == 0:
-        return True, ""
-    msg = (result.stderr.strip() or result.stdout.strip() or "unknown error")
-    return False, msg
+    log = result.stderr.strip() or result.stdout.strip() or "no output"
+    return result.returncode == 0, log
 
 
 def setup_ssh_key(gateway: str = _SLURM_GATEWAY) -> str:
