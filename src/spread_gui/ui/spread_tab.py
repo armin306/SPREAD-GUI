@@ -217,6 +217,7 @@ class _PhenixSubmitWorker(QThread):
         self.log_message.emit("SLURM JWT token acquired.")
 
         submitted = 0
+        logged_url = False
         for energy, images in self._jobs:
             submitted += 1
             self.progress.emit("Submitting Phenix jobs…", submitted, total)
@@ -228,13 +229,17 @@ class _PhenixSubmitWorker(QThread):
                 wrapper, self._proc_dir, token, job_name=f"phenix_r{self._run}",
                 cpus_per_task=4, memory_per_node="2G",
             )
+            if not logged_url:
+                self.log_message.emit(err)   # err carries the discovery log on first call
+                logged_url = True
+
             if rc in (0, 200):
                 self.log_message.emit(
                     f"  Submitted ({energy} eV, {images} img): {out.strip()}"
                 )
             else:
                 self.log_message.emit(
-                    f"  Failed ({energy} eV, {images} img) rc={rc}: {err or out}"
+                    f"  Failed ({energy} eV, {images} img) rc={rc}: {out.strip()}"
                 )
 
         self.done.emit(submitted)

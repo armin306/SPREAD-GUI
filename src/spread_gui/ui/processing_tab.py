@@ -115,6 +115,7 @@ class _SubmitWorker(QThread):
 
         self.progress.emit(f"Submitting {total} jobs…", 0, total)
         submitted = 0
+        logged_url = False
         for e, cumulative, ctr in self._jobs:
             submitted += 1
             self.progress.emit("Submitting jobs…", submitted, total)
@@ -125,10 +126,14 @@ class _SubmitWorker(QThread):
             )
             rc, out, err = submit_job_via_rest_api(wrapper, self._proc_dir, token)
 
+            if not logged_url:
+                self.log_message.emit(err)   # err carries the discovery log on first call
+                logged_url = True
+
             if rc in (0, 200):
                 self.log_message.emit(f"Submitted job {submitted}/{total}: {out.strip()}")
             else:
-                self.log_message.emit(f"Submission failed (rc={rc}): {err or out}")
+                self.log_message.emit(f"Submission failed (rc={rc}): {out.strip()}")
 
             if self._crystal_id is not None and rc in (0, 200):
                 slurm_id = ProcessingTab._parse_slurm_job_id(rc, out, use_rest=True)

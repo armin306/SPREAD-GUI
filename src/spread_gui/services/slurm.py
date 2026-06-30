@@ -18,41 +18,62 @@ _SLURM_REST_BASE    = "https://slurm-rest.diamond.ac.uk:8443"
 _SLURM_REST_FALLBACK_VERSION = "v0.0.40"
 _SLURM_GATEWAY      = "wilson"
 
-# Cached after the first successful discovery so every job in a session
-# doesn't re-query the openapi endpoint.
+# Only cache successful discoveries — fallback is never cached so each
+# submission retries the openapi endpoint in case it becomes reachable.
 _slurm_api_version: str | None = None
 
 
-def discover_slurm_api_version() -> str:
-    """Return the slurmrestd API version string (e.g. 'v0.0.41').
+def discover_slurm_api_version(token: str = "", user: str = "") -> tuple[str, str]:
+    """Return (api_version, log_message) for the slurmrestd instance.
 
-    Queries the /openapi/v3 endpoint, which lists every valid path including
-    the current version prefix.  Falls back to _SLURM_REST_FALLBACK_VERSION
-    if the endpoint is unreachable or the response is unparseable.
+    First tries an unauthenticated GET /openapi/v3.  If that fails or returns
+    no usable paths, retries with JWT auth headers (some DLS configurations
+    require them).  Falls back to _SLURM_REST_FALLBACK_VERSION on complete
+    failure and does NOT cache that fallback so the next call retries.
     """
     global _slurm_api_version
     if _slurm_api_version is not None:
-        return _slurm_api_version
+        return _slurm_api_version, f"SLURM REST API version (cached): {_slurm_api_version}"
 
     url = f"{_SLURM_REST_BASE}/openapi/v3"
-    try:
-        if _requests is not None:
-            data = _requests.get(url, timeout=10).json()
-        else:
-            import urllib.request
-            with urllib.request.urlopen(url, timeout=10) as resp:
-                data = json.loads(resp.read())
+    auth_headers = {}
+    if token and user:
+        auth_headers = {"X-SLURM-USER-NAME": user, "X-SLURM-USER-TOKEN": token}
 
-        for path in data.get("paths", {}):
-            m = re.match(r"^/slurm/(v\d+\.\d+\.\d+)/job/submit$", path)
-            if m:
-                _slurm_api_version = m.group(1)
-                return _slurm_api_version
-    except Exception:
-        pass
+    last_error = ""
+    for attempt, headers in enumerate([{}, auth_headers]):
+        if attempt == 1 and not auth_headers:
+            break
+        try:
+            if _requests is not None:
+                r = _requests.get(url, headers=headers, timeout=10, verify=True)
+                if r.status_code != 200:
+                    last_error = f"GET {url} returned HTTP {r.status_code}"
+                    continue
+                data = r.json()
+            else:
+                import urllib.request
+                req = urllib.request.Request(url, headers=headers)
+                with urllib.request.urlopen(req, timeout=10) as resp:
+                    data = json.loads(resp.read())
 
-    _slurm_api_version = _SLURM_REST_FALLBACK_VERSION
-    return _slurm_api_version
+            for path in data.get("paths", {}):
+                m = re.match(r"^/slurm/(v\d+\.\d+\.\d+)/job/submit$", path)
+                if m:
+                    _slurm_api_version = m.group(1)
+                    label = "authenticated" if headers else "unauthenticated"
+                    return _slurm_api_version, (
+                        f"Discovered SLURM REST API version via {label} "
+                        f"openapi query: {_slurm_api_version}"
+                    )
+            last_error = f"GET {url} succeeded but no /slurm/vX.Y.Z/job/submit path found in response"
+        except Exception as exc:
+            last_error = f"GET {url}: {exc}"
+
+    return _SLURM_REST_FALLBACK_VERSION, (
+        f"WARNING: SLURM REST API version discovery failed ({last_error}); "
+        f"using fallback {_SLURM_REST_FALLBACK_VERSION}"
+    )
 
 
 def chmod_x(path: str) -> None:
@@ -204,16 +225,21 @@ def submit_job_via_rest_api(
     cpus_per_task: int = 16,
     memory_per_node: str = "4G",
 ) -> Tuple[int, str, str]:
-    """Submit a job script to SLURM via the Diamond Light Source REST API."""
-    api_version = discover_slurm_api_version()
+    """Submit a job script to SLURM via the Diamond Light Source REST API.
+
+    Returns (status_code, stdout_or_body, stderr_or_discovery_log).
+    The third element carries the API version discovery log so callers
+    can emit it as a diagnostic message on the first job submission.
+    """
+    user = os.environ.get("USER", "")
+    api_version, discovery_log = discover_slurm_api_version(token=token, user=user)
     rest_url = f"{_SLURM_REST_BASE}/slurm/{api_version}/job/submit"
 
     if dry_run:
         preview = "\n".join(script_content.splitlines()[:3])
-        return 0, f"[DRY] Would POST to {rest_url}:\n{preview}\n…", ""
+        return 0, f"[DRY] Would POST to {rest_url}:\n{preview}\n…", discovery_log
 
     script = _prepare_script(script_content)
-    user = os.environ.get("USER", "")
 
     payload: dict = {
         "job": {
