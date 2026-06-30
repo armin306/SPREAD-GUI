@@ -27,7 +27,6 @@ from PyQt6.QtWidgets import (
     QSpinBox,
     QMessageBox,
     QCheckBox,
-    QInputDialog,
 )
 
 from spread_gui.core.model import Cell
@@ -1127,16 +1126,9 @@ xia2 pipeline=3dii \\
             self.btn_setup_ssh_key.setText("Setup SSH key…")
 
     def _setup_ssh_key(self) -> None:
-        password, ok = QInputDialog.getText(
-            self,
-            "Wilson SSH password",
-            "Enter your Wilson (DLS) password to copy your SSH key:",
-            QLineEdit.EchoMode.Password,
-        )
-        if not ok or not password:
-            return
+        self._log("Running ssh-copy-id — enter your Wilson password in the console when prompted.")
         try:
-            output = setup_ssh_key(password)
+            output = setup_ssh_key()
         except Exception as e:
             self._warn("SSH key setup failed", str(e))
             self._check_ssh_key_status()

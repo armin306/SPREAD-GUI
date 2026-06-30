@@ -4,7 +4,6 @@ import json
 import os
 import re
 import stat
-import shlex
 import subprocess
 from pathlib import Path
 from typing import Tuple
@@ -104,67 +103,40 @@ def check_ssh_key_auth(gateway: str = _SLURM_GATEWAY) -> tuple[bool, str]:
     return False, msg
 
 
-def setup_ssh_key(password: str, gateway: str = _SLURM_GATEWAY) -> str:
-    """Copy the user's SSH public key to the gateway using a Qt-supplied password.
+def setup_ssh_key(gateway: str = _SLURM_GATEWAY) -> str:
+    """Copy the local SSH public key to the gateway.
 
-    The password is passed to ssh-copy-id via SSH_ASKPASS so it never appears
-    on the terminal.  The temporary askpass script is deleted immediately after.
+    Runs ssh-copy-id without detaching from the controlling terminal, so ssh
+    can prompt for the password on the console — the same mechanism used by
+    get_slurm_jwt().  stdout/stderr are captured for logging and error
+    detection; the password prompt goes through /dev/tty directly and is
+    unaffected by the capture.
 
-    Returns the combined stdout+stderr from ssh-copy-id for display in the log.
+    Returns the combined stdout+stderr for display in the GUI log.
     Raises RuntimeError on failure or if no keys were installed.
     """
-    config_dir = Path.home() / ".config" / "spread_gui"
-    config_dir.mkdir(parents=True, exist_ok=True)
-    askpass_path = str(config_dir / "_askpass.sh")
-
-    # Write with 0o700 atomically so the file is never world-readable,
-    # even for the brief moment between creation and chmod.
-    script = f"#!/bin/sh\nprintf '%s\\n' {shlex.quote(password)}\n"
-    fd = os.open(askpass_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o700)
-    with os.fdopen(fd, "w") as fh:
-        fh.write(script)
-
-    try:
-        env = os.environ.copy()
-        env["SSH_ASKPASS"] = askpass_path
-        env["SSH_ASKPASS_REQUIRE"] = "force"
-        env.setdefault("DISPLAY", ":0")
-
-        result = subprocess.run(
-            [
-                "ssh-copy-id",
-                "-o", "StrictHostKeyChecking=accept-new",
-                gateway,
-            ],
-            capture_output=True,
-            text=True,
-            env=env,
-            start_new_session=True,
-            timeout=30,
-        )
-    finally:
-        try:
-            # Overwrite with zeros before deleting so the password is gone
-            # even if deletion fails (e.g. after SIGKILL on a subsequent run).
-            with open(askpass_path, "w") as fh:
-                fh.write("\x00" * len(script))
-            os.unlink(askpass_path)
-        except Exception:
-            pass
+    result = subprocess.run(
+        [
+            "ssh-copy-id",
+            "-o", "StrictHostKeyChecking=accept-new",
+            gateway,
+        ],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
 
     combined = "\n".join(
         part for part in (result.stdout.strip(), result.stderr.strip()) if part
     )
 
     if result.returncode != 0:
-        raise RuntimeError(combined or "ssh-copy-id exited with a non-zero status but produced no output.")
+        raise RuntimeError(combined or "ssh-copy-id exited non-zero but produced no output.")
 
-    # ssh-copy-id exits 0 even when authentication succeeded but it had nothing
-    # to install (wrong password causes it to copy 0 keys).
     if "Number of key(s) added: 0" in combined:
         raise RuntimeError(
             f"ssh-copy-id connected to {gateway} but installed 0 keys "
-            f"(wrong password, or all keys already present):\n{combined}"
+            f"(wrong password, or key already present but auth still fails):\n{combined}"
         )
 
     return combined
