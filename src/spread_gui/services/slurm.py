@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import stat
 import shlex
 import subprocess
@@ -13,8 +14,45 @@ try:
 except Exception:
     _requests = None
 
-_SLURM_REST_URL = "https://slurm-rest.diamond.ac.uk:8443/slurm/v0.0.40/job/submit"
-_SLURM_GATEWAY = "wilson"
+_SLURM_REST_BASE    = "https://slurm-rest.diamond.ac.uk:8443"
+_SLURM_REST_FALLBACK_VERSION = "v0.0.40"
+_SLURM_GATEWAY      = "wilson"
+
+# Cached after the first successful discovery so every job in a session
+# doesn't re-query the openapi endpoint.
+_slurm_api_version: str | None = None
+
+
+def discover_slurm_api_version() -> str:
+    """Return the slurmrestd API version string (e.g. 'v0.0.41').
+
+    Queries the /openapi/v3 endpoint, which lists every valid path including
+    the current version prefix.  Falls back to _SLURM_REST_FALLBACK_VERSION
+    if the endpoint is unreachable or the response is unparseable.
+    """
+    global _slurm_api_version
+    if _slurm_api_version is not None:
+        return _slurm_api_version
+
+    url = f"{_SLURM_REST_BASE}/openapi/v3"
+    try:
+        if _requests is not None:
+            data = _requests.get(url, timeout=10).json()
+        else:
+            import urllib.request
+            with urllib.request.urlopen(url, timeout=10) as resp:
+                data = json.loads(resp.read())
+
+        for path in data.get("paths", {}):
+            m = re.match(r"^/slurm/(v\d+\.\d+\.\d+)/job/submit$", path)
+            if m:
+                _slurm_api_version = m.group(1)
+                return _slurm_api_version
+    except Exception:
+        pass
+
+    _slurm_api_version = _SLURM_REST_FALLBACK_VERSION
+    return _slurm_api_version
 
 
 def chmod_x(path: str) -> None:
@@ -167,9 +205,12 @@ def submit_job_via_rest_api(
     memory_per_node: str = "4G",
 ) -> Tuple[int, str, str]:
     """Submit a job script to SLURM via the Diamond Light Source REST API."""
+    api_version = discover_slurm_api_version()
+    rest_url = f"{_SLURM_REST_BASE}/slurm/{api_version}/job/submit"
+
     if dry_run:
         preview = "\n".join(script_content.splitlines()[:3])
-        return 0, f"[DRY] Would POST to SLURM REST API:\n{preview}\n…", ""
+        return 0, f"[DRY] Would POST to {rest_url}:\n{preview}\n…", ""
 
     script = _prepare_script(script_content)
     user = os.environ.get("USER", "")
@@ -203,7 +244,7 @@ def submit_job_via_rest_api(
     if _requests is not None:
         try:
             r = _requests.post(
-                _SLURM_REST_URL, headers=headers, json=payload, timeout=30
+                rest_url, headers=headers, json=payload, timeout=30
             )
             return r.status_code, r.text, ""
         except Exception as exc:
@@ -215,7 +256,7 @@ def submit_job_via_rest_api(
 
     body = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(
-        _SLURM_REST_URL, data=body, headers=headers, method="POST"
+        rest_url, data=body, headers=headers, method="POST"
     )
     try:
         with urllib.request.urlopen(req, timeout=30) as resp:
