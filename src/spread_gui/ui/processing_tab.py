@@ -79,6 +79,72 @@ class _DataScanWorker(QThread):
             self.wedge_found.emit(wedge, total, num_sweeps, diag)
 
 
+class _SubmitWorker(QThread):
+    """Fetches a SLURM JWT token and submits jobs via the REST API, off the main thread."""
+    log_message  = pyqtSignal(str)
+    progress     = pyqtSignal(str, int, int)   # text, done, total
+    token_error  = pyqtSignal(str)
+    done         = pyqtSignal(int)             # number of jobs submitted
+
+    def __init__(
+        self,
+        db: ProjectDB,
+        crystal_id: Optional[int],
+        pipeline: str,
+        proc_dir: str,
+        script_path: str,
+        jobs: List[Tuple[int, int, int]],
+    ) -> None:
+        super().__init__()
+        self._db          = db
+        self._crystal_id  = crystal_id
+        self._pipeline    = pipeline
+        self._proc_dir    = proc_dir
+        self._script_path = script_path
+        self._jobs        = jobs
+
+    def run(self) -> None:
+        total = len(self._jobs)
+        self.progress.emit("Fetching SLURM token…", 0, total)
+        try:
+            token = get_slurm_jwt()
+        except Exception as e:
+            self.token_error.emit(str(e))
+            return
+        self.log_message.emit("SLURM JWT token acquired.")
+
+        self.progress.emit(f"Submitting {total} jobs…", 0, total)
+        submitted = 0
+        for e, cumulative, ctr in self._jobs:
+            submitted += 1
+            self.progress.emit("Submitting jobs…", submitted, total)
+
+            wrapper = (
+                f"#!/bin/bash\n"
+                f"bash {shlex.quote(self._script_path)} {e} {cumulative} {ctr}\n"
+            )
+            rc, out, err = submit_job_via_rest_api(wrapper, self._proc_dir, token)
+
+            if rc in (0, 200):
+                self.log_message.emit(f"Submitted job {submitted}/{total}: {out.strip()}")
+            else:
+                self.log_message.emit(f"Submission failed (rc={rc}): {err or out}")
+
+            if self._crystal_id is not None and rc in (0, 200):
+                slurm_id = ProcessingTab._parse_slurm_job_id(rc, out, use_rest=True)
+                self._db.add_job(
+                    crystal_id=self._crystal_id,
+                    pipeline=self._pipeline,
+                    proc_dir=self._proc_dir,
+                    energy_ev=e,
+                    cumulative=cumulative,
+                    dry_run=False,
+                    slurm_job_id=slurm_id,
+                )
+
+        self.done.emit(submitted)
+
+
 class ProcessingTab(QWidget):
     # Emitted when a crystal is loaded from the database (project_name, crystal_name, results_path).
     crystal_context_changed = pyqtSignal(str, str, str)
@@ -113,6 +179,7 @@ class ProcessingTab(QWidget):
 
         self._last_auto_energies: Optional[List[int]] = None
         self._scan_worker: Optional[_DataScanWorker] = None
+        self._submit_worker: Optional[_SubmitWorker] = None
         self._num_sweeps: int = 1
 
         self._build_ui()
@@ -1233,53 +1300,43 @@ xia2 pipeline=3dii \\
             self.jobs_status_changed.emit()
             return
 
-        # REST API submission
+        # REST API submission — run off the GUI thread so the window stays
+        # responsive while we SSH to wilson for a token and submit jobs.
+        self.btn_submit.setEnabled(False)
         if hasattr(mw, "set_status"):
             mw.set_status("Fetching SLURM token…", 0, total)
-        try:
-            token = get_slurm_jwt()
-            self._log("SLURM JWT token acquired.")
-        except Exception as e:
-            self._warn(
-                "Token error",
-                f"Could not obtain SLURM JWT via SSH to wilson:\n\n{e}",
-            )
-            return
 
+        worker = _SubmitWorker(
+            db=self._db,
+            crystal_id=self._current_crystal_id,
+            pipeline=pipeline,
+            proc_dir=proc_dir,
+            script_path=script_path,
+            jobs=jobs,
+        )
+        self._submit_worker = worker
+        worker.log_message.connect(self._log)
+        worker.progress.connect(
+            lambda text, done, tot: mw.set_status(text, done, tot) if hasattr(mw, "set_status") else None
+        )
+        worker.token_error.connect(self._on_submit_token_error)
+        worker.done.connect(self._on_submit_done)
+        worker.start()
+
+    def _on_submit_token_error(self, message: str) -> None:
+        mw = self.window()
         if hasattr(mw, "set_status"):
-            mw.set_status(f"Submitting {total} jobs…", 0, total)
+            mw.set_status("Ready.", 0, 0)
+        self.btn_submit.setEnabled(True)
+        self._warn(
+            "Token error",
+            f"Could not obtain SLURM JWT via SSH to wilson:\n\n{message}",
+        )
 
-        crystal_id = self._current_crystal_id
-        submitted = 0
-        for e, cumulative, ctr in jobs:
-            submitted += 1
-            if hasattr(mw, "set_status"):
-                mw.set_status("Submitting jobs…", submitted, total)
-
-            wrapper = (
-                f"#!/bin/bash\n"
-                f"bash {shlex.quote(script_path)} {e} {cumulative} {ctr}\n"
-            )
-            rc, out, err = submit_job_via_rest_api(wrapper, proc_dir, token)
-
-            if rc in (0, 200):
-                self._log(f"Submitted job {submitted}/{total}: {out.strip()}")
-            else:
-                self._log(f"Submission failed (rc={rc}): {err or out}")
-
-            if crystal_id is not None and rc in (0, 200):
-                slurm_id = self._parse_slurm_job_id(rc, out, use_rest=True)
-                self._db.add_job(
-                    crystal_id=crystal_id,
-                    pipeline=pipeline,
-                    proc_dir=proc_dir,
-                    energy_ev=e,
-                    cumulative=cumulative,
-                    dry_run=False,
-                    slurm_job_id=slurm_id,
-                )
-
+    def _on_submit_done(self, total: int) -> None:
+        mw = self.window()
         if hasattr(mw, "set_status"):
             mw.set_status("Done.", total, total)
+        self.btn_submit.setEnabled(True)
         self._info("Submission complete", f"Submitted {total} job(s).")
         self.jobs_status_changed.emit()

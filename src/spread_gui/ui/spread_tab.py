@@ -186,6 +186,60 @@ class _PhenixAnalysisWorker(QThread):
             self.error.emit(str(exc))
 
 
+class _PhenixSubmitWorker(QThread):
+    """Fetches a SLURM JWT token and submits Phenix jobs via the REST API, off the main thread."""
+    log_message  = pyqtSignal(str)
+    progress     = pyqtSignal(str, int, int)   # text, done, total
+    token_error  = pyqtSignal(str)
+    done         = pyqtSignal(int)             # number of jobs submitted
+
+    def __init__(
+        self,
+        proc_dir: str,
+        script_path: str,
+        run: int,
+        jobs: List[Tuple[int, int]],
+    ) -> None:
+        super().__init__()
+        self._proc_dir    = proc_dir
+        self._script_path = script_path
+        self._run         = run
+        self._jobs        = jobs
+
+    def run(self) -> None:
+        total = len(self._jobs)
+        self.progress.emit("Fetching SLURM token…", 0, total)
+        try:
+            token = get_slurm_jwt()
+        except Exception as e:
+            self.token_error.emit(str(e))
+            return
+        self.log_message.emit("SLURM JWT token acquired.")
+
+        submitted = 0
+        for energy, images in self._jobs:
+            submitted += 1
+            self.progress.emit("Submitting Phenix jobs…", submitted, total)
+            wrapper = (
+                f"#!/bin/bash\n"
+                f"bash {shlex.quote(self._script_path)} {energy} {images}\n"
+            )
+            rc, out, err = submit_job_via_rest_api(
+                wrapper, self._proc_dir, token, job_name=f"phenix_r{self._run}",
+                cpus_per_task=4, memory_per_node="2G",
+            )
+            if rc in (0, 200):
+                self.log_message.emit(
+                    f"  Submitted ({energy} eV, {images} img): {out.strip()}"
+                )
+            else:
+                self.log_message.emit(
+                    f"  Failed ({energy} eV, {images} img) rc={rc}: {err or out}"
+                )
+
+        self.done.emit(submitted)
+
+
 class SpreadTab(QWidget):
     log_message = pyqtSignal(str)
 
@@ -199,6 +253,7 @@ class SpreadTab(QWidget):
         self._crystal_name: str = ""
         self._analysis_worker: _PhenixAnalysisWorker | None = None
         self._status_worker:   _StatusScanWorker | None = None
+        self._submit_worker:   _PhenixSubmitWorker | None = None
         self._build_ui()
         QTimer.singleShot(0, self._check_ssh_key_status)
 
@@ -733,45 +788,44 @@ phenix.refine ${{energy}}eV_${{images}}img.pdb ${{energy}}eV_${{images}}img.mtz 
                 )
             return
 
-        # REST API submission
+        # REST API submission \u2014 run off the GUI thread so the window stays
+        # responsive while we SSH to wilson for a token and submit jobs.
         mw = self.window()
         total = len(jobs)
+        self.btn_submit.setEnabled(False)
         if hasattr(mw, "set_status"):
             mw.set_status("Fetching SLURM token\u2026", 0, total)
-        try:
-            token = get_slurm_jwt()
-            self.log_message.emit("SLURM JWT token acquired.")
-        except Exception as e:
-            QMessageBox.warning(
-                self, "Token error",
-                f"Could not obtain SLURM JWT via SSH to wilson:\n\n{e}",
-            )
-            return
 
-        submitted = 0
-        for energy, images in jobs:
-            submitted += 1
-            if hasattr(mw, "set_status"):
-                mw.set_status("Submitting Phenix jobs\u2026", submitted, total)
-            wrapper = (
-                f"#!/bin/bash\n"
-                f"bash {shlex.quote(script_path)} {energy} {images}\n"
-            )
-            rc, out, err = submit_job_via_rest_api(
-                wrapper, proc_dir, token, job_name=f"phenix_r{run}",
-                cpus_per_task=4, memory_per_node="2G",
-            )
-            if rc in (0, 200):
-                self.log_message.emit(
-                    f"  Submitted ({energy} eV, {images} img): {out.strip()}"
-                )
-            else:
-                self.log_message.emit(
-                    f"  Failed ({energy} eV, {images} img) rc={rc}: {err or out}"
-                )
+        worker = _PhenixSubmitWorker(
+            proc_dir=proc_dir,
+            script_path=script_path,
+            run=run,
+            jobs=jobs,
+        )
+        self._submit_worker = worker
+        worker.log_message.connect(self.log_message.emit)
+        worker.progress.connect(
+            lambda text, done, tot: mw.set_status(text, done, tot) if hasattr(mw, "set_status") else None
+        )
+        worker.token_error.connect(self._on_submit_token_error)
+        worker.done.connect(lambda submitted: self._on_submit_done(submitted, run))
+        worker.start()
 
+    def _on_submit_token_error(self, message: str) -> None:
+        mw = self.window()
+        if hasattr(mw, "set_status"):
+            mw.set_status("Ready.", 0, 0)
+        self.btn_submit.setEnabled(True)
+        QMessageBox.warning(
+            self, "Token error",
+            f"Could not obtain SLURM JWT via SSH to wilson:\n\n{message}",
+        )
+
+    def _on_submit_done(self, total: int, run: int) -> None:
+        mw = self.window()
         if hasattr(mw, "set_status"):
             mw.set_status("Done.", total, total)
+        self.btn_submit.setEnabled(True)
         QMessageBox.information(
             self, "Submission complete",
             f"Submitted {total} Phenix job(s) as run {run}.",
