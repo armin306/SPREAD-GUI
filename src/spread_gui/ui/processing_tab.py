@@ -882,7 +882,6 @@ done
 
     def _make_autoproc_job(self, data_dir: str, cell: Cell, sg: str, total_images: int) -> str:
         return f"""#!/bin/bash
-. /etc/profile.d/modules.sh
 #SBATCH --job-name=autoPROC_job
 #SBATCH --output=/dev/null
 #SBATCH --error=/dev/null
@@ -890,6 +889,7 @@ done
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=4G
+. /etc/profile.d/modules.sh
 module load autoPROC
 BASE_DIR=$(pwd)
 DATA_DIR="{data_dir}"
@@ -933,7 +933,6 @@ process -M DiamondI23 \\
 
     def _make_xia2_dials_job(self, data_dir: str, cell: Cell, sg: str, project: str, crystal: str, total_images: int) -> str:
         return f"""#!/bin/bash
-. /etc/profile.d/modules.sh
 #SBATCH --job-name=xia2_dials_job
 #SBATCH --output=/dev/null
 #SBATCH --error=/dev/null
@@ -941,6 +940,7 @@ process -M DiamondI23 \\
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=4G
+. /etc/profile.d/modules.sh
 module load xia2
 BASE_DIR=$(pwd)
 DATA_DIR="{data_dir}"
@@ -987,7 +987,6 @@ xia2 pipeline=dials \\
 
     def _make_xia2_3dii_job(self, data_dir: str, cell: Cell, sg: str, project: str, crystal: str, total_images: int) -> str:
         return f"""#!/bin/bash
-. /etc/profile.d/modules.sh
 #SBATCH --job-name=xia2_3dii_job
 #SBATCH --output=/dev/null
 #SBATCH --error=/dev/null
@@ -995,6 +994,7 @@ xia2 pipeline=dials \\
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=4G
+. /etc/profile.d/modules.sh
 module load xia2
 BASE_DIR=$(pwd)
 DATA_DIR="{data_dir}"

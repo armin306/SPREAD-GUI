@@ -620,7 +620,6 @@ class SpreadTab(QWidget):
         mtz_snippet = self._mtz_symlink_snippet(pipeline)
         dir_prefix = _PHENIX_DIR_PREFIX[pipeline]
         return f"""#!/bin/bash
-. /etc/profile.d/modules.sh
 #SBATCH --job-name=phenix_job
 #SBATCH --output=/dev/null
 #SBATCH --error=/dev/null
@@ -628,6 +627,7 @@ class SpreadTab(QWidget):
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=2G
+. /etc/profile.d/modules.sh
 module load phenix
 
 BASE_DIR=$(pwd)

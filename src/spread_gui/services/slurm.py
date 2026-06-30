@@ -122,12 +122,21 @@ def get_slurm_jwt(lifespan: int = 300) -> str:
 
 
 def _prepare_script(content: str) -> str:
-    """Ensure the script has a bash shebang and sources the modules environment."""
+    """Ensure the script has a bash shebang and sources the modules environment.
+
+    The modules.sh source line must be inserted after the trailing block of
+    #SBATCH directives, not immediately after the shebang — SLURM stops
+    scanning for #SBATCH lines at the first non-comment line, so inserting
+    it earlier would cause all #SBATCH directives to be silently ignored.
+    """
     if not content.startswith("#!/bin/bash"):
         content = "#!/bin/bash\n" + content
     lines = content.splitlines()
     if not any(". /etc/profile.d/modules.sh" in line for line in lines):
-        lines.insert(1, ". /etc/profile.d/modules.sh")
+        insert_at = 1
+        while insert_at < len(lines) and lines[insert_at].startswith("#SBATCH"):
+            insert_at += 1
+        lines.insert(insert_at, ". /etc/profile.d/modules.sh")
     return "\n".join(lines)
 
 
