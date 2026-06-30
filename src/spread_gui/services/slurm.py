@@ -246,17 +246,17 @@ def submit_job_via_rest_api(
             "partition": "cs04r,cs05r",
             "tasks": 1,
             "name": job_name,
-            "nodes": 1,
-            "cpus_per_task": str(cpus_per_task),
+            "nodes": "1",
+            "cpus_per_task": cpus_per_task,
             "memory_per_node": memory_per_node,
             "current_working_directory": cwd,
-            "environment": {
-                "USER": user,
-                "PATH": (
-                    "/usr/share/Modules/bin:/usr/local/bin:/usr/local/sbin"
+            "environment": [
+                f"USER={user}",
+                (
+                    "PATH=/usr/share/Modules/bin:/usr/local/bin:/usr/local/sbin"
                     f":/usr/bin:/usr/sbin:/var/cfengine/bin:/home/{user}/bin"
                 ),
-            },
+            ],
         },
         "script": script,
     }
