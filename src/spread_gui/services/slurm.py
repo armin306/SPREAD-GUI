@@ -199,7 +199,7 @@ def submit_job_via_rest_api(
     job_name: str = "i23_proc",
     dry_run: bool = False,
     cpus_per_task: int = 16,
-    memory_per_node: str = "4G",
+    memory_per_node: str = "8G",
 ) -> Tuple[int, str, str]:
     """Submit a job script to SLURM via the Diamond Light Source REST API.
 

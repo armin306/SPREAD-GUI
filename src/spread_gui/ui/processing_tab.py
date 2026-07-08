@@ -959,7 +959,7 @@ done
 #SBATCH --partition=cs04r,cs05r
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=16
-#SBATCH --mem=4G
+#SBATCH --mem=8G
 . /etc/profile.d/modules.sh
 module load autoPROC
 BASE_DIR=$(pwd)
@@ -1010,7 +1010,7 @@ process -M DiamondI23 \\
 #SBATCH --partition=cs04r,cs05r
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=16
-#SBATCH --mem=4G
+#SBATCH --mem=8G
 . /etc/profile.d/modules.sh
 module load xia2
 BASE_DIR=$(pwd)
@@ -1064,7 +1064,7 @@ xia2 pipeline=dials \\
 #SBATCH --partition=cs04r,cs05r
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=16
-#SBATCH --mem=4G
+#SBATCH --mem=8G
 . /etc/profile.d/modules.sh
 module load xia2
 BASE_DIR=$(pwd)
