@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import base64
 import html as _html
+import os
 import re
 from datetime import datetime
 from io import BytesIO
@@ -376,10 +377,13 @@ def _write_html(
         for w in wedges:
             if w not in results[energy]:
                 cells.append('<td class="na">—</td>')
-            elif results[energy][w] is None:
-                cells.append('<td class="fail">&#x2717; Failed</td>')
             else:
-                cells.append('<td class="ok">&#x2713; OK</td>')
+                summary_html = proc_path / f"{energy}eV" / f"{w}img" / "autoPROC" / "00_summary.html"
+                rel = os.path.relpath(summary_html, out_dir)
+                if results[energy][w] is None:
+                    cells.append(f'<td class="fail"><a href="{rel}">&#x2717; Failed</a></td>')
+                else:
+                    cells.append(f'<td class="ok"><a href="{rel}">&#x2713; OK</a></td>')
         rows.append("<tr>" + "".join(cells) + "</tr>")
 
     status_table = (
@@ -424,6 +428,8 @@ def _write_html(
     td.ok   {{ background: #d4edda; text-align: center; }}
     td.fail {{ background: #f8d7da; text-align: center; }}
     td.na   {{ background: #f0f0f0; text-align: center; color: #999; }}
+    td.ok a, td.fail a {{ color: inherit; text-decoration: none; font-weight: bold; }}
+    td.ok a:hover, td.fail a:hover {{ text-decoration: underline; }}
     img {{ border: 1px solid #ddd; margin: 6px 0; max-width: 100%; }}
     ul.toc {{ columns: 2; }}
   </style>
