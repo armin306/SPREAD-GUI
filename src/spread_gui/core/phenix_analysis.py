@@ -6,11 +6,14 @@ Plots f' and f'' versus energy:
   - Per-wedge: f' and f'' side-by-side, one line per group
   - R-work / R-free vs energy: one line per wedge size
 
-Plots are embedded as base64; no external PNG or CSV files are written.
+Plots are embedded as base64 in the HTML report.
+One CSV per wedge is also written alongside index.html ({images}img.csv):
+  columns: energy_eV, group, f_prime, f_double_prime, r_work, r_free
 """
 from __future__ import annotations
 
 import base64
+import csv
 import html as _html
 from datetime import datetime
 from io import BytesIO
@@ -202,6 +205,40 @@ def _summary_table(
 
 
 # ---------------------------------------------------------------------------
+# CSV export
+# ---------------------------------------------------------------------------
+
+def _write_csvs(
+    results: dict[tuple[int, int], PhenixResult],
+    energies: list[int],
+    wedges: list[int],
+    groups: list[str],
+    out_dir: Path,
+) -> None:
+    """Write one CSV per wedge size ({images}img.csv) into out_dir.
+
+    Columns: energy_eV, group, f_prime, f_double_prime, r_work, r_free
+    r_work and r_free are repeated for every group row at the same energy.
+    """
+    for images in sorted(wedges):
+        path = out_dir / f"{images}img.csv"
+        with path.open("w", newline="", encoding="utf-8") as fh:
+            w = csv.writer(fh)
+            w.writerow(["energy_eV", "group", "f_prime", "f_double_prime", "r_work", "r_free"])
+            for energy in sorted(energies):
+                res = results.get((energy, images))
+                if res is None:
+                    continue
+                rw = res.r_work_final if res.r_work_final is not None else ""
+                rf = res.r_free_final if res.r_free_final is not None else ""
+                sel_to_g = {g.selection: g for g in res.groups}
+                for sel in groups:
+                    g = sel_to_g.get(sel)
+                    if g is not None:
+                        w.writerow([energy, group_short_label(sel), g.f_prime, g.f_double_prime, rw, rf])
+
+
+# ---------------------------------------------------------------------------
 # Main entry point
 # ---------------------------------------------------------------------------
 
@@ -247,6 +284,10 @@ def generate_report(
             if g.selection not in seen:
                 groups.append(g.selection)
                 seen.add(g.selection)
+
+    # ---- CSV export ----
+    progress("Writing CSV data files…")
+    _write_csvs(results, energies, wedges, groups, out_dir)
 
     # ---- Summary plots (one per group) ----
     progress("Generating summary plots…")
@@ -304,6 +345,11 @@ def generate_report(
     toc_items += [f'<li><a href="#wedge_{w}img">{w} images</a></li>' for w in wedges]
     toc = "<ul>" + "".join(toc_items) + "</ul>"
 
+    csv_link_items = " &nbsp;|&nbsp; ".join(
+        f'<a href="{w}img.csv">{w}img.csv</a>' for w in wedges
+    )
+    csv_links = f'<p class="meta">Data: {csv_link_items}</p>'
+
     meta_lines = []
     if pdb_model:
         meta_lines.append(f"<b>PDB model:</b> {_html.escape(pdb_model)}")
@@ -344,6 +390,7 @@ a {{ color: #1a4a8a; }}
 
 <h2>Contents</h2>
 {toc}
+{csv_links}
 
 {"".join(group_summary_sections)}
 
